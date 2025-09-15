@@ -34,47 +34,51 @@ fn main() -> io::Result<()> {
         terminal.draw(|f| ui(f, &app))?;
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
-                match app.focus {
-                    FocusArea::Commit => match key.code {
-                        KeyCode::Char('q') => app.should_quit = true,
-                        KeyCode::Char(c) => app.commit_message.push(c),
-                        KeyCode::Backspace => {
-                            app.commit_message.pop();
-                        }
-                        KeyCode::Enter => {
-                            if !app.commit_message.is_empty() {
-                                if app.commit(&app.commit_message.clone()).is_ok() {
-                                    app.commit_message.clear();
-                                    app.update_status();
-                                }
-                            }
-                        }
-                        KeyCode::Down => app.focus = FocusArea::Files,
-                        _ => {}
-                    },
-                    FocusArea::Files => match key.code {
-                        KeyCode::Char('q') => app.should_quit = true,
-                        KeyCode::Down => app.select_next(),
-                        KeyCode::Up => {
-                            if app.selected_index == 0 {
-                                app.focus = FocusArea::Commit;
-                            } else {
-                                app.select_previous();
-                            }
-                        }
-                        KeyCode::Enter => {
-                            app.toggle_selection();
-                            app.update_status();
-                        }
-                        _ => {}
-                    },
-                }
+                handle_key_event(&mut app, key.code);
             }
         }
     }
 
     cleanup_terminal()?;
     Ok(())
+}
+
+fn handle_key_event(app: &mut App, key_code: KeyCode) {
+    match app.focus {
+        FocusArea::Commit => match key_code {
+            KeyCode::Char('q') => app.should_quit = true,
+            KeyCode::Char(c) => app.commit_message.push(c),
+            KeyCode::Backspace => {
+                app.commit_message.pop();
+            }
+            KeyCode::Enter => {
+                if !app.commit_message.is_empty() {
+                    if app.commit(&app.commit_message.clone()).is_ok() {
+                        app.commit_message.clear();
+                        app.update_status();
+                    }
+                }
+            }
+            KeyCode::Down => app.focus = FocusArea::Files,
+            _ => {}
+        },
+        FocusArea::Files => match key_code {
+            KeyCode::Char('q') => app.should_quit = true,
+            KeyCode::Down => app.select_next(),
+            KeyCode::Up => {
+                if app.selected_index == 0 {
+                    app.focus = FocusArea::Commit;
+                } else {
+                    app.select_previous();
+                }
+            }
+            KeyCode::Enter => {
+                app.toggle_selection();
+                app.update_status();
+            }
+            _ => {}
+        },
+    }
 }
 
 fn cleanup_terminal() -> io::Result<()> {
@@ -551,5 +555,74 @@ mod tests {
             "File should be in not-staged list"
         );
         assert_eq!(app.not_staged_files[0], "a.txt");
+    }
+
+    #[test]
+    fn test_focus_movement() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = setup_repo(&temp_dir);
+        let mut app = App::new(repo);
+
+        // With a file in the list
+        let file_path = temp_dir.path().join("new_file.txt");
+        File::create(&file_path).unwrap();
+        app.update_status();
+
+        // Initial state: Files focus
+        assert!(matches!(app.focus, FocusArea::Files));
+        assert_eq!(app.selected_index, 0);
+
+        // Press Up at index 0 -> focus moves to Commit
+        handle_key_event(&mut app, KeyCode::Up);
+        assert!(matches!(app.focus, FocusArea::Commit));
+
+        // Press Down -> focus moves back to Files
+        handle_key_event(&mut app, KeyCode::Down);
+        assert!(matches!(app.focus, FocusArea::Files));
+        assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn test_commit_input() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = setup_repo(&temp_dir);
+        let mut app = App::new(repo);
+        app.focus = FocusArea::Commit;
+
+        // Type a message
+        handle_key_event(&mut app, KeyCode::Char('t'));
+        handle_key_event(&mut app, KeyCode::Char('e'));
+        handle_key_event(&mut app, KeyCode::Char('s'));
+        handle_key_event(&mut app, KeyCode::Char('t'));
+        assert_eq!(app.commit_message, "test");
+
+        // Backspace
+        handle_key_event(&mut app, KeyCode::Backspace);
+        assert_eq!(app.commit_message, "tes");
+
+        // Quit
+        handle_key_event(&mut app, KeyCode::Char('q'));
+        assert!(app.should_quit)
+    }
+
+    #[test]
+    fn test_file_navigation_does_not_switch_focus() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = setup_repo(&temp_dir);
+        
+        // Add two files
+        File::create(temp_dir.path().join("file1.txt")).unwrap();
+        File::create(temp_dir.path().join("file2.txt")).unwrap();
+
+        let mut app = App::new(repo);
+        app.update_status();
+
+        assert_eq!(app.total_files(), 2);
+        app.selected_index = 1; // Start at the second file
+
+        // Press Up, should not change focus
+        handle_key_event(&mut app, KeyCode::Up);
+        assert!(matches!(app.focus, FocusArea::Files));
+        assert_eq!(app.selected_index, 0);
     }
 }
