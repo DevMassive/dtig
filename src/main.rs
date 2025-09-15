@@ -2,13 +2,13 @@ use git2::{Repository, StatusOptions};
 use ratatui::{
     crossterm::{
         ExecutableCommand,
-        event::{self, Event, KeyCode},
+        event::{self, Event, KeyCode, KeyEventKind},
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
     layout::{Constraint, Layout},
     prelude::*,
     style::{Modifier, Style},
-    widgets::{Block, Borders, List, ListItem},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 use std::io::{self, stdout};
 use std::path::Path;
@@ -33,21 +33,42 @@ fn main() -> io::Result<()> {
     while !app.should_quit {
         terminal.draw(|f| ui(f, &app))?;
         if let Event::Key(key) = event::read()? {
-            match key.code {
-                KeyCode::Char('q') => app.should_quit = true,
-                KeyCode::Down => app.select_next(),
-                KeyCode::Up => app.select_previous(),
-                KeyCode::Enter => {
-                    app.toggle_selection();
-                    app.update_status();
+            if key.kind == KeyEventKind::Press {
+                match app.focus {
+                    FocusArea::Commit => match key.code {
+                        KeyCode::Char('q') => app.should_quit = true,
+                        KeyCode::Char(c) => app.commit_message.push(c),
+                        KeyCode::Backspace => {
+                            app.commit_message.pop();
+                        }
+                        KeyCode::Enter => {
+                            if !app.commit_message.is_empty() {
+                                if app.commit(&app.commit_message.clone()).is_ok() {
+                                    app.commit_message.clear();
+                                    app.update_status();
+                                }
+                            }
+                        }
+                        KeyCode::Down => app.focus = FocusArea::Files,
+                        _ => {}
+                    },
+                    FocusArea::Files => match key.code {
+                        KeyCode::Char('q') => app.should_quit = true,
+                        KeyCode::Down => app.select_next(),
+                        KeyCode::Up => {
+                            if app.selected_index == 0 {
+                                app.focus = FocusArea::Commit;
+                            } else {
+                                app.select_previous();
+                            }
+                        }
+                        KeyCode::Enter => {
+                            app.toggle_selection();
+                            app.update_status();
+                        }
+                        _ => {}
+                    },
                 }
-                KeyCode::Char('C') => {
-                    // TODO: Prompt for a real commit message
-                    if app.commit("WIP commit").is_ok() {
-                        app.update_status();
-                    }
-                }
-                _ => {}
             }
         }
     }
@@ -62,6 +83,8 @@ fn cleanup_terminal() -> io::Result<()> {
     Ok(())
 }
 
+enum FocusArea { Commit, Files }
+
 struct App {
     repo: Repository,
     staged_files: Vec<String>,
@@ -69,6 +92,8 @@ struct App {
     untracked_files: Vec<String>,
     selected_index: usize,
     should_quit: bool,
+    commit_message: String,
+    focus: FocusArea,
 }
 
 impl App {
@@ -80,6 +105,8 @@ impl App {
             untracked_files: Vec::new(),
             selected_index: 0,
             should_quit: false,
+            commit_message: String::new(),
+            focus: FocusArea::Files,
         }
     }
 
@@ -238,7 +265,27 @@ impl App {
 }
 
 fn ui(frame: &mut Frame, app: &App) {
-    let chunks = Layout::default()
+    let main_chunks = Layout::default()
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(frame.area());
+
+    let input_block = Block::default().borders(Borders::ALL).title("Commit Message");
+    let input = Paragraph::new(app.commit_message.as_str())
+        .style(match app.focus {
+            FocusArea::Commit => Style::default().fg(Color::Yellow),
+            _ => Style::default(),
+        })
+        .block(input_block);
+    frame.render_widget(input, main_chunks[0]);
+
+    if let FocusArea::Commit = app.focus {
+        frame.set_cursor_position((
+            main_chunks[0].x + app.commit_message.len() as u16 + 1,
+            main_chunks[0].y + 1,
+        ));
+    }
+
+    let file_chunks = Layout::default()
         .constraints(
             [
                 Constraint::Percentage(33),
@@ -247,7 +294,7 @@ fn ui(frame: &mut Frame, app: &App) {
             ]
             .as_ref(),
         )
-        .split(frame.area());
+        .split(main_chunks[1]);
 
     let mut current_index = 0;
 
@@ -265,7 +312,7 @@ fn ui(frame: &mut Frame, app: &App) {
         .collect();
     let staged_list =
         List::new(staged_items).block(Block::default().borders(Borders::ALL).title("Staged"));
-    frame.render_widget(staged_list, chunks[0]);
+    frame.render_widget(staged_list, file_chunks[0]);
 
     let not_staged_items: Vec<ListItem> = app
         .not_staged_files
@@ -281,7 +328,7 @@ fn ui(frame: &mut Frame, app: &App) {
         .collect();
     let not_staged_list = List::new(not_staged_items)
         .block(Block::default().borders(Borders::ALL).title("Not Staged"));
-    frame.render_widget(not_staged_list, chunks[1]);
+    frame.render_widget(not_staged_list, file_chunks[1]);
 
     let untracked_items: Vec<ListItem> = app
         .untracked_files
@@ -297,7 +344,7 @@ fn ui(frame: &mut Frame, app: &App) {
         .collect();
     let untracked_list =
         List::new(untracked_items).block(Block::default().borders(Borders::ALL).title("Untracked"));
-    frame.render_widget(untracked_list, chunks[2]);
+    frame.render_widget(untracked_list, file_chunks[2]);
 }
 
 #[cfg(test)]
