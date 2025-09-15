@@ -143,14 +143,14 @@ impl App {
 
             let diff_result = if is_untracked {
                 // For untracked files, show the whole file as an addition
-                let content = self.repo.blob_path(path)
-                    .and_then(|oid| self.repo.find_blob(oid))
-                    .ok()
-                    .as_ref()
-                    .map_or(Vec::new(), |b| b.content().to_vec());
-                let content_str = String::from_utf8_lossy(&content);
-                let lines = content_str.lines().map(|l| format!("+{}", l)).collect::<Vec<_>>();
-                Ok(lines.join("\n"))
+                let full_path = self.repo.workdir().unwrap().join(path);
+                match std::fs::read_to_string(full_path) {
+                    Ok(content) => {
+                        let lines = content.lines().map(|l| format!("+{}", l)).collect::<Vec<_>>();
+                        Ok(lines.join("\n"))
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
             } else {
                 let diff_opts = &mut git2::DiffOptions::new();
                 diff_opts.pathspec(path);
@@ -722,5 +722,71 @@ mod tests {
         handle_key_event(&mut app, KeyCode::Up);
         assert!(matches!(app.focus, FocusArea::Files));
         assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn test_diff_generation() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = setup_repo(&temp_dir);
+        commit_initial(&repo);
+
+        // 1. Create and commit a file for the staged test
+        let staged_path = temp_dir.path().join("staged.txt");
+        let mut staged_file = File::create(&staged_path).unwrap();
+        writeln!(staged_file, "line1").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("staged.txt")).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let signature = repo.signature().unwrap();
+        let parent_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &signature, &signature, "add staged.txt", &tree, &[&parent_commit]).unwrap();
+
+        // 2. Create and commit a file for the not-staged test
+        let not_staged_path = temp_dir.path().join("not_staged.txt");
+        let mut not_staged_file = File::create(&not_staged_path).unwrap();
+        writeln!(not_staged_file, "abc").unwrap();
+        index.add_path(Path::new("not_staged.txt")).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let parent_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &signature, &signature, "add not_staged.txt", &tree, &[&parent_commit]).unwrap();
+
+        // 3. Modify the files
+        writeln!(staged_file, "line2").unwrap(); // Modified
+        index.add_path(Path::new("staged.txt")).unwrap(); // Staged
+        index.write().unwrap();
+
+        writeln!(not_staged_file, "def").unwrap(); // Modified, not staged
+
+        // 4. Create an untracked file
+        let untracked_path = temp_dir.path().join("untracked.txt");
+        let mut untracked_file = File::create(&untracked_path).unwrap();
+        writeln!(untracked_file, "new").unwrap();
+
+        // 5. Create app and test
+        let repo_for_app = Repository::open(temp_dir.path()).unwrap();
+        let mut app = App::new(repo_for_app);
+        app.update_status();
+
+        // Test diff for staged file
+        let staged_index = app.staged_files.iter().position(|r| r == "staged.txt").unwrap();
+        app.selected_index = staged_index;
+        app.update_diff();
+        assert!(app.diff.contains("\n+line2"), "Diff for staged was: '{}'", app.diff);
+
+        // Test diff for not-staged file
+        let not_staged_index = app.not_staged_files.iter().position(|r| r == "not_staged.txt").unwrap();
+        app.selected_index = app.staged_files.len() + not_staged_index;
+        app.update_diff();
+        assert!(app.diff.contains("\n+def"), "Diff for not-staged was: '{}'", app.diff);
+
+        // Test diff for untracked file
+        let untracked_index = app.untracked_files.iter().position(|r| r == "untracked.txt").unwrap();
+        app.selected_index = app.staged_files.len() + app.not_staged_files.len() + untracked_index;
+        app.update_diff();
+        assert!(app.diff.contains("+new"), "Diff for untracked was: '{}'", app.diff);
     }
 }
