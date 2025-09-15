@@ -1,14 +1,16 @@
-use std::io::{self, stdout};
+use git2::{Repository, StatusOptions};
 use ratatui::{
     crossterm::{
-        event::{self, Event, KeyCode},
-        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
         ExecutableCommand,
+        event::{self, Event, KeyCode},
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
+    layout::{Constraint, Layout},
     prelude::*,
-    widgets::Paragraph,
+    style::{Modifier, Style},
+    widgets::{Block, Borders, List, ListItem},
 };
-use git2::{Repository, StatusOptions};
+use std::io::{self, stdout};
 use std::path::Path;
 
 fn main() -> io::Result<()> {
@@ -21,7 +23,7 @@ fn main() -> io::Result<()> {
         Err(e) => {
             cleanup_terminal()?;
             eprintln!("Failed to open repository: {}", e);
-            return Ok(())
+            return Ok(());
         }
     };
 
@@ -31,8 +33,15 @@ fn main() -> io::Result<()> {
     while !app.should_quit {
         terminal.draw(|f| ui(f, &app))?;
         if let Event::Key(key) = event::read()? {
-            if key.code == KeyCode::Char('q') {
-                app.should_quit = true;
+            match key.code {
+                KeyCode::Char('q') => app.should_quit = true,
+                KeyCode::Down => app.select_next(),
+                KeyCode::Up => app.select_previous(),
+                KeyCode::Enter => {
+                    app.toggle_selection();
+                    app.update_status();
+                }
+                _ => {}
             }
         }
     }
@@ -49,7 +58,10 @@ fn cleanup_terminal() -> io::Result<()> {
 
 struct App {
     repo: Repository,
-    status: Vec<String>,
+    staged_files: Vec<String>,
+    not_staged_files: Vec<String>,
+    untracked_files: Vec<String>,
+    selected_index: usize,
     should_quit: bool,
 }
 
@@ -57,12 +69,26 @@ impl App {
     fn new(repo: Repository) -> Self {
         Self {
             repo,
-            status: Vec::new(),
+            staged_files: Vec::new(),
+            not_staged_files: Vec::new(),
+            untracked_files: Vec::new(),
+            selected_index: 0,
             should_quit: false,
         }
     }
 
     fn update_status(&mut self) {
+        // Force the index to be re-read from disk. This is crucial because
+        // operations like `reset_default` modify the index, but `repo.statuses()`
+        // might read from a stale in-memory cache.
+        if let Ok(mut index) = self.repo.index() {
+            let _ = index.read(true);
+        }
+
+        self.staged_files.clear();
+        self.not_staged_files.clear();
+        self.untracked_files.clear();
+
         let mut status_opts = StatusOptions::new();
         status_opts.include_untracked(true);
         let statuses = match self.repo.statuses(Some(&mut status_opts)) {
@@ -70,56 +96,179 @@ impl App {
             Err(_) => return,
         };
 
-        let mut status_list = Vec::new();
         for entry in statuses.iter() {
-            let status = entry.status();
-            let path = entry.path().unwrap_or("[invalid utf-8]");
-            let status_str = if status.is_wt_modified() {
-                "modified:"
-            } else if status.is_wt_new() {
-                "new file:"
-            } else if status.is_wt_deleted() {
-                "deleted:"
-            } else if status.is_wt_renamed() {
-                "renamed:"
-            } else if status.is_wt_typechange() {
-                "typechange:"
-            } else if status.is_index_new() {
-                "new file:"
-            } else if status.is_index_modified() {
-                "modified:"
-            } else if status.is_index_deleted() {
-                "deleted:"
-            } else if status.is_index_renamed() {
-                "renamed:"
-            } else if status.is_index_typechange() {
-                "typechange:"
-            } else {
-                ""
+            let path = match entry.path() {
+                Some(p) => p.to_string(),
+                None => continue,
             };
-            if !status_str.is_empty() {
-                status_list.push(format!("\t{} {}", status_str, path));
+            let status = entry.status();
+
+            if status.intersects(
+                git2::Status::INDEX_MODIFIED
+                    | git2::Status::INDEX_NEW
+                    | git2::Status::INDEX_DELETED
+                    | git2::Status::INDEX_RENAMED
+                    | git2::Status::INDEX_TYPECHANGE,
+            ) {
+                self.staged_files.push(path.clone());
+            }
+
+            if status.intersects(
+                git2::Status::WT_MODIFIED
+                    | git2::Status::WT_DELETED
+                    | git2::Status::WT_RENAMED
+                    | git2::Status::WT_TYPECHANGE,
+            ) {
+                self.not_staged_files.push(path.clone());
+            }
+
+            if status.is_wt_new() {
+                self.untracked_files.push(path);
             }
         }
-        self.status = status_list;
+
+        let total_files = self.total_files();
+        if total_files == 0 {
+            self.selected_index = 0;
+        } else if self.selected_index >= total_files {
+            self.selected_index = total_files - 1;
+        }
+    }
+
+    fn total_files(&self) -> usize {
+        self.staged_files.len() + self.not_staged_files.len() + self.untracked_files.len()
+    }
+
+    fn select_next(&mut self) {
+        let total = self.total_files();
+        if total > 0 {
+            self.selected_index = (self.selected_index + 1) % total;
+        }
+    }
+
+    fn select_previous(&mut self) {
+        let total = self.total_files();
+        if total > 0 {
+            if self.selected_index == 0 {
+                self.selected_index = total - 1;
+            } else {
+                self.selected_index -= 1;
+            }
+        }
+    }
+
+    fn toggle_selection(&mut self) {
+        let total_staged = self.staged_files.len();
+        let total_not_staged = self.not_staged_files.len();
+
+        if self.selected_index >= self.total_files() {
+            return;
+        }
+
+        if self.selected_index < total_staged {
+            // Unstage the file. This is equivalent to `git reset HEAD <path>`.
+            let path = &self.staged_files[self.selected_index];
+            match self.repo.head() {
+                Ok(head) => {
+                    // HEAD exists. Peel it to a commit, get its tree, and reset the index from there.
+                    if let Ok(commit) = head.peel_to_commit() {
+                        self.repo
+                            .reset_default(Some(commit.as_object()), &[path])
+                            .unwrap();
+                    }
+                }
+                Err(_) => {
+                    // No HEAD exists (e.g. initial commit). Unstaging means removing from the index.
+                    if let Ok(mut index) = self.repo.index() {
+                        index.remove_path(Path::new(path)).unwrap();
+                        index.write().unwrap();
+                    }
+                }
+            }
+        } else {
+            // Stage
+            let path_str = if self.selected_index < total_staged + total_not_staged {
+                &self.not_staged_files[self.selected_index - total_staged]
+            } else {
+                &self.untracked_files[self.selected_index - total_staged - total_not_staged]
+            };
+            let mut index = self.repo.index().unwrap();
+            index.add_path(Path::new(path_str)).unwrap();
+            index.write().unwrap();
+        }
     }
 }
 
 fn ui(frame: &mut Frame, app: &App) {
-    let status_text: String = app.status.join("\n");
-    frame.render_widget(
-        Paragraph::new(status_text),
-        frame.area(),
-    )
+    let chunks = Layout::default()
+        .constraints(
+            [
+                Constraint::Percentage(33),
+                Constraint::Percentage(33),
+                Constraint::Percentage(34),
+            ]
+            .as_ref(),
+        )
+        .split(frame.area());
+
+    let mut current_index = 0;
+
+    let staged_items: Vec<ListItem> = app
+        .staged_files
+        .iter()
+        .map(|file| {
+            let mut style = Style::default();
+            if app.selected_index == current_index {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            current_index += 1;
+            ListItem::new(file.as_str()).style(style)
+        })
+        .collect();
+    let staged_list =
+        List::new(staged_items).block(Block::default().borders(Borders::ALL).title("Staged"));
+    frame.render_widget(staged_list, chunks[0]);
+
+    let not_staged_items: Vec<ListItem> = app
+        .not_staged_files
+        .iter()
+        .map(|file| {
+            let mut style = Style::default();
+            if app.selected_index == current_index {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            current_index += 1;
+            ListItem::new(file.as_str()).style(style)
+        })
+        .collect();
+    let not_staged_list = List::new(not_staged_items)
+        .block(Block::default().borders(Borders::ALL).title("Not Staged"));
+    frame.render_widget(not_staged_list, chunks[1]);
+
+    let untracked_items: Vec<ListItem> = app
+        .untracked_files
+        .iter()
+        .map(|file| {
+            let mut style = Style::default();
+            if app.selected_index == current_index {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            current_index += 1;
+            ListItem::new(file.as_str()).style(style)
+        })
+        .collect();
+    let untracked_list =
+        List::new(untracked_items).block(Block::default().borders(Borders::ALL).title("Untracked"));
+    frame.render_widget(untracked_list, chunks[2]);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use git2::{Repository, Signature};
     use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
-    use git2::{Repository, Signature, StatusOptions};
 
     fn setup_repo(temp_dir: &TempDir) -> Repository {
         let repo = Repository::init(temp_dir.path()).unwrap();
@@ -134,7 +283,15 @@ mod tests {
         let oid = index.write_tree().unwrap();
         let tree = repo.find_tree(oid).unwrap();
         let signature = Signature::now("Test User", "test@example.com").unwrap();
-        repo.commit(Some("HEAD"), &signature, &signature, "initial commit", &tree, &[]).unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "initial commit",
+            &tree,
+            &[],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -151,8 +308,8 @@ mod tests {
         let mut app = App::new(repo_for_app);
         app.update_status();
 
-        assert_eq!(app.status.len(), 1);
-        assert_eq!(app.status[0], "\tnew file: new_file.txt");
+        assert_eq!(app.untracked_files.len(), 1);
+        assert_eq!(app.untracked_files[0], "new_file.txt");
     }
 
     #[test]
@@ -166,31 +323,148 @@ mod tests {
 
         let mut index = repo.index().unwrap();
         index.add_path(Path::new("modified_file.txt")).unwrap();
-        index.write().unwrap(); 
+        index.write().unwrap();
         let oid = index.write_tree().unwrap();
         let tree = repo.find_tree(oid).unwrap();
         let signature = Signature::now("Test User", "test@example.com").unwrap();
-        repo.commit(Some("HEAD"), &signature, &signature, "add modified_file.txt", &tree, &[]).unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "add modified_file.txt",
+            &tree,
+            &[],
+        )
+        .unwrap();
 
         let mut file = File::options().append(true).open(&file_path).unwrap();
         writeln!(file, " world").unwrap();
 
         let repo_for_app = Repository::open(temp_dir.path()).unwrap();
 
-        {
-            let mut status_opts = StatusOptions::new();
-            status_opts.include_untracked(true);
-            let statuses = repo_for_app.statuses(Some(&mut status_opts)).unwrap();
-            let entry = statuses.iter().find(|e| e.path() == Some("modified_file.txt")).unwrap();
-            let status = entry.status();
-            
-            assert!(status.is_wt_modified(), "WT_MODIFIED should be true. Status was: {:?}", status);
-        }
-
         let mut app = App::new(repo_for_app);
         app.update_status();
 
-        assert_eq!(app.status.len(), 1);
-        assert_eq!(app.status[0], "\tmodified: modified_file.txt");
+        assert_eq!(app.not_staged_files.len(), 1);
+        assert_eq!(app.not_staged_files[0], "modified_file.txt");
+    }
+
+    #[test]
+    fn test_toggle_selection_stage_untracked_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = setup_repo(&temp_dir);
+        commit_initial(&repo);
+
+        let file_path = temp_dir.path().join("new_file.txt");
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, "hello").unwrap();
+
+        let repo_for_app = Repository::open(temp_dir.path()).unwrap();
+        let mut app = App::new(repo_for_app);
+        app.update_status();
+
+        assert_eq!(app.untracked_files.len(), 1);
+        assert_eq!(app.staged_files.len(), 0);
+        app.selected_index = 0; // The only file is untracked
+
+        app.toggle_selection();
+        app.update_status();
+
+        assert_eq!(app.untracked_files.len(), 0);
+        assert_eq!(app.staged_files.len(), 1);
+        assert_eq!(app.staged_files[0], "new_file.txt");
+    }
+
+    #[test]
+    fn test_toggle_selection_unstage_staged_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = setup_repo(&temp_dir);
+        commit_initial(&repo);
+
+        let file_path = temp_dir.path().join("new_file.txt");
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, "hello").unwrap();
+
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("new_file.txt")).unwrap();
+        index.write().unwrap();
+
+        let repo_for_app = Repository::open(temp_dir.path()).unwrap();
+        let mut app = App::new(repo_for_app);
+        app.update_status();
+
+        assert_eq!(app.staged_files.len(), 1);
+        assert_eq!(app.untracked_files.len(), 0);
+        app.selected_index = 0; // The only file is staged
+
+        app.toggle_selection();
+        app.update_status();
+
+        assert_eq!(app.staged_files.len(), 0);
+        assert_eq!(app.untracked_files.len(), 1);
+        assert_eq!(app.untracked_files[0], "new_file.txt");
+    }
+
+    #[test]
+    fn test_unstage_modified_file_scenario() {
+        // 1. Setup repo and commit a file
+        let temp_dir = TempDir::new().unwrap();
+        let repo = setup_repo(&temp_dir);
+        let file_path = temp_dir.path().join("a.txt");
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, "v1").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("a.txt")).unwrap();
+        index.write().unwrap();
+        let oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(oid).unwrap();
+        let signature = Signature::now("Test User", "test@example.com").unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "commit v1",
+            &tree,
+            &[],
+        )
+        .unwrap();
+
+        // 2. Modify the file
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file_path)
+            .unwrap();
+        writeln!(file, "v2").unwrap();
+
+        // 3. Stage the modification
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("a.txt")).unwrap();
+        index.write().unwrap();
+
+        // 4. Create app and assert initial state (file is staged)
+        let repo_for_app = Repository::open(temp_dir.path()).unwrap();
+        let mut app = App::new(repo_for_app);
+        app.update_status();
+        assert_eq!(app.staged_files.len(), 1, "File should be staged");
+        assert_eq!(app.staged_files[0], "a.txt");
+        assert_eq!(
+            app.not_staged_files.len(),
+            0,
+            "Should be no not-staged files yet"
+        );
+
+        // 5. Select the file and unstage it
+        app.selected_index = 0;
+        app.toggle_selection();
+        app.update_status();
+
+        // 6. Assert final state (file is now not-staged)
+        assert_eq!(app.staged_files.len(), 0, "File should be unstaged");
+        assert_eq!(
+            app.not_staged_files.len(),
+            1,
+            "File should be in not-staged list"
+        );
+        assert_eq!(app.not_staged_files[0], "a.txt");
     }
 }
