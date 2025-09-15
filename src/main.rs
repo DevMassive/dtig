@@ -41,6 +41,12 @@ fn main() -> io::Result<()> {
                     app.toggle_selection();
                     app.update_status();
                 }
+                KeyCode::Char('C') => {
+                    // TODO: Prompt for a real commit message
+                    if app.commit("WIP commit").is_ok() {
+                        app.update_status();
+                    }
+                }
                 _ => {}
             }
         }
@@ -195,6 +201,38 @@ impl App {
             let mut index = self.repo.index().unwrap();
             index.add_path(Path::new(path_str)).unwrap();
             index.write().unwrap();
+        }
+    }
+
+    fn commit(&mut self, message: &str) -> Result<git2::Oid, git2::Error> {
+        let mut index = self.repo.index()?;
+        let tree_oid = index.write_tree()?;
+        let tree = self.repo.find_tree(tree_oid)?;
+
+        let signature = self.repo.signature()?;
+
+        let parent_commit = self.find_head_commit()?;
+        let parents = if let Some(parent) = &parent_commit {
+            vec![parent]
+        } else {
+            vec![]
+        };
+
+        self.repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree,
+            &parents,
+        )
+    }
+
+    fn find_head_commit(&self) -> Result<Option<git2::Commit>, git2::Error> {
+        match self.repo.head() {
+            Ok(head) => head.peel_to_commit().map(Some),
+            Err(e) if e.code() == git2::ErrorCode::UnbornBranch => Ok(None),
+            Err(e) => Err(e),
         }
     }
 }
