@@ -74,10 +74,10 @@ impl App {
         for entry in statuses.iter() {
             let status = entry.status();
             let path = entry.path().unwrap_or("[invalid utf-8]");
-            let status_str = if status.is_wt_new() {
-                "new file:"
-            } else if status.is_wt_modified() {
+            let status_str = if status.is_wt_modified() {
                 "modified:"
+            } else if status.is_wt_new() {
+                "new file:"
             } else if status.is_wt_deleted() {
                 "deleted:"
             } else if status.is_wt_renamed() {
@@ -98,7 +98,7 @@ impl App {
                 ""
             };
             if !status_str.is_empty() {
-                status_list.push(format!("\t{} of {}", status_str, path));
+                status_list.push(format!("\t{} {}", status_str, path));
             }
         }
         self.status = status_list;
@@ -119,7 +119,7 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
-    use git2::{Repository, Signature};
+    use git2::{Repository, Signature, StatusOptions};
 
     fn setup_repo(temp_dir: &TempDir) -> Repository {
         let repo = Repository::init(temp_dir.path()).unwrap();
@@ -147,7 +147,6 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         writeln!(file, "hello").unwrap();
 
-        // We need to open the repository from the temp_dir for the test
         let repo_for_app = Repository::open(temp_dir.path()).unwrap();
         let mut app = App::new(repo_for_app);
         app.update_status();
@@ -167,6 +166,7 @@ mod tests {
 
         let mut index = repo.index().unwrap();
         index.add_path(Path::new("modified_file.txt")).unwrap();
+        index.write().unwrap(); 
         let oid = index.write_tree().unwrap();
         let tree = repo.find_tree(oid).unwrap();
         let signature = Signature::now("Test User", "test@example.com").unwrap();
@@ -175,8 +175,18 @@ mod tests {
         let mut file = File::options().append(true).open(&file_path).unwrap();
         writeln!(file, " world").unwrap();
 
-        // We need to open the repository from the temp_dir for the test
         let repo_for_app = Repository::open(temp_dir.path()).unwrap();
+
+        {
+            let mut status_opts = StatusOptions::new();
+            status_opts.include_untracked(true);
+            let statuses = repo_for_app.statuses(Some(&mut status_opts)).unwrap();
+            let entry = statuses.iter().find(|e| e.path() == Some("modified_file.txt")).unwrap();
+            let status = entry.status();
+            
+            assert!(status.is_wt_modified(), "WT_MODIFIED should be true. Status was: {:?}", status);
+        }
+
         let mut app = App::new(repo_for_app);
         app.update_status();
 
