@@ -76,6 +76,8 @@ fn handle_key_event(app: &mut App, key_code: KeyCode) {
                 app.toggle_selection();
                 app.update_status();
             }
+            KeyCode::Char('j') => app.diff_scroll = app.diff_scroll.saturating_add(1),
+            KeyCode::Char('k') => app.diff_scroll = app.diff_scroll.saturating_sub(1),
             _ => {}
         },
     }
@@ -98,6 +100,8 @@ struct App {
     should_quit: bool,
     commit_message: String,
     focus: FocusArea,
+    diff: String,
+    diff_scroll: u16,
 }
 
 impl App {
@@ -111,7 +115,80 @@ impl App {
             should_quit: false,
             commit_message: String::new(),
             focus: FocusArea::Files,
+            diff: String::new(),
+            diff_scroll: 0,
         }
+    }
+
+    fn update_diff(&mut self) {
+        let selected_path_str = {
+            let total_staged = self.staged_files.len();
+            let total_not_staged = self.not_staged_files.len();
+
+            if self.selected_index < total_staged {
+                Some(self.staged_files[self.selected_index].clone())
+            } else if self.selected_index < total_staged + total_not_staged {
+                Some(self.not_staged_files[self.selected_index - total_staged].clone())
+            } else if self.selected_index < self.total_files() {
+                Some(self.untracked_files[self.selected_index - total_staged - total_not_staged].clone())
+            } else {
+                None
+            }
+        };
+
+        let diff_text = if let Some(path_str) = selected_path_str {
+            let path = Path::new(&path_str);
+            let is_staged = self.staged_files.contains(&path_str);
+            let is_untracked = self.untracked_files.contains(&path_str);
+
+            let diff_result = if is_untracked {
+                // For untracked files, show the whole file as an addition
+                let content = self.repo.blob_path(path)
+                    .and_then(|oid| self.repo.find_blob(oid))
+                    .ok()
+                    .as_ref()
+                    .map_or(Vec::new(), |b| b.content().to_vec());
+                let content_str = String::from_utf8_lossy(&content);
+                let lines = content_str.lines().map(|l| format!("+{}", l)).collect::<Vec<_>>();
+                Ok(lines.join("\n"))
+            } else {
+                let diff_opts = &mut git2::DiffOptions::new();
+                diff_opts.pathspec(path);
+
+                let diff = if is_staged {
+                    let head_tree = self.repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+                    self.repo.diff_tree_to_index(head_tree.as_ref(), None, Some(diff_opts))
+                } else {
+                    self.repo.diff_index_to_workdir(None, Some(diff_opts))
+                };
+
+                match diff {
+                    Ok(diff) => {
+                        let mut diff_str = String::new();
+                        diff.print(git2::DiffFormat::Patch, |_, _, line| {
+                            let prefix = match line.origin() {
+                                '+' | '-' | '=' => line.origin().to_string(),
+                                _ => " ".to_string(),
+                            };
+                            diff_str.push_str(&format!("{}{}", prefix, String::from_utf8_lossy(line.content())));
+                            true
+                        }).unwrap();
+                        Ok(diff_str)
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            };
+
+            match diff_result {
+                Ok(text) => text,
+                Err(e) => format!("Failed to generate diff: {}", e),
+            }
+        } else {
+            String::new()
+        };
+
+        self.diff = diff_text;
+        self.diff_scroll = 0;
     }
 
     fn update_status(&mut self) {
@@ -126,41 +203,43 @@ impl App {
         self.not_staged_files.clear();
         self.untracked_files.clear();
 
-        let mut status_opts = StatusOptions::new();
-        status_opts.include_untracked(true);
-        let statuses = match self.repo.statuses(Some(&mut status_opts)) {
-            Ok(statuses) => statuses,
-            Err(_) => return,
-        };
-
-        for entry in statuses.iter() {
-            let path = match entry.path() {
-                Some(p) => p.to_string(),
-                None => continue,
+        {
+            let mut status_opts = StatusOptions::new();
+            status_opts.include_untracked(true);
+            let statuses = match self.repo.statuses(Some(&mut status_opts)) {
+                Ok(statuses) => statuses,
+                Err(_) => return,
             };
-            let status = entry.status();
 
-            if status.intersects(
-                git2::Status::INDEX_MODIFIED
-                    | git2::Status::INDEX_NEW
-                    | git2::Status::INDEX_DELETED
-                    | git2::Status::INDEX_RENAMED
-                    | git2::Status::INDEX_TYPECHANGE,
-            ) {
-                self.staged_files.push(path.clone());
-            }
+            for entry in statuses.iter() {
+                let path = match entry.path() {
+                    Some(p) => p.to_string(),
+                    None => continue,
+                };
+                let status = entry.status();
 
-            if status.intersects(
-                git2::Status::WT_MODIFIED
-                    | git2::Status::WT_DELETED
-                    | git2::Status::WT_RENAMED
-                    | git2::Status::WT_TYPECHANGE,
-            ) {
-                self.not_staged_files.push(path.clone());
-            }
+                if status.intersects(
+                    git2::Status::INDEX_MODIFIED
+                        | git2::Status::INDEX_NEW
+                        | git2::Status::INDEX_DELETED
+                        | git2::Status::INDEX_RENAMED
+                        | git2::Status::INDEX_TYPECHANGE,
+                ) {
+                    self.staged_files.push(path.clone());
+                }
 
-            if status.is_wt_new() {
-                self.untracked_files.push(path);
+                if status.intersects(
+                    git2::Status::WT_MODIFIED
+                        | git2::Status::WT_DELETED
+                        | git2::Status::WT_RENAMED
+                        | git2::Status::WT_TYPECHANGE,
+                ) {
+                    self.not_staged_files.push(path.clone());
+                }
+
+                if status.is_wt_new() {
+                    self.untracked_files.push(path);
+                }
             }
         }
 
@@ -170,6 +249,7 @@ impl App {
         } else if self.selected_index >= total_files {
             self.selected_index = total_files - 1;
         }
+        self.update_diff();
     }
 
     fn total_files(&self) -> usize {
@@ -181,6 +261,7 @@ impl App {
         if total > 0 {
             self.selected_index = (self.selected_index + 1) % total;
         }
+        self.update_diff();
     }
 
     fn select_previous(&mut self) {
@@ -192,6 +273,7 @@ impl App {
                 self.selected_index -= 1;
             }
         }
+        self.update_diff();
     }
 
     fn toggle_selection(&mut self) {
@@ -269,9 +351,14 @@ impl App {
 }
 
 fn ui(frame: &mut Frame, app: &App) {
-    let main_chunks = Layout::default()
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
+    let screen_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(frame.area());
+
+    let left_chunks = Layout::default()
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(screen_chunks[0]);
 
     let input_block = Block::default().borders(Borders::ALL).title("Commit Message");
     let input = Paragraph::new(app.commit_message.as_str())
@@ -280,12 +367,12 @@ fn ui(frame: &mut Frame, app: &App) {
             _ => Style::default(),
         })
         .block(input_block);
-    frame.render_widget(input, main_chunks[0]);
+    frame.render_widget(input, left_chunks[0]);
 
     if let FocusArea::Commit = app.focus {
         frame.set_cursor_position((
-            main_chunks[0].x + app.commit_message.len() as u16 + 1,
-            main_chunks[0].y + 1,
+            left_chunks[0].x + app.commit_message.len() as u16 + 1,
+            left_chunks[0].y + 1,
         ));
     }
 
@@ -298,7 +385,7 @@ fn ui(frame: &mut Frame, app: &App) {
             ]
             .as_ref(),
         )
-        .split(main_chunks[1]);
+        .split(left_chunks[1]);
 
     let mut current_index = 0;
 
@@ -307,8 +394,10 @@ fn ui(frame: &mut Frame, app: &App) {
         .iter()
         .map(|file| {
             let mut style = Style::default();
-            if app.selected_index == current_index {
-                style = style.add_modifier(Modifier::REVERSED);
+            if let FocusArea::Files = app.focus {
+                if app.selected_index == current_index {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
             }
             current_index += 1;
             ListItem::new(file.as_str()).style(style)
@@ -323,8 +412,10 @@ fn ui(frame: &mut Frame, app: &App) {
         .iter()
         .map(|file| {
             let mut style = Style::default();
-            if app.selected_index == current_index {
-                style = style.add_modifier(Modifier::REVERSED);
+            if let FocusArea::Files = app.focus {
+                if app.selected_index == current_index {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
             }
             current_index += 1;
             ListItem::new(file.as_str()).style(style)
@@ -339,8 +430,10 @@ fn ui(frame: &mut Frame, app: &App) {
         .iter()
         .map(|file| {
             let mut style = Style::default();
-            if app.selected_index == current_index {
-                style = style.add_modifier(Modifier::REVERSED);
+            if let FocusArea::Files = app.focus {
+                if app.selected_index == current_index {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
             }
             current_index += 1;
             ListItem::new(file.as_str()).style(style)
@@ -349,6 +442,11 @@ fn ui(frame: &mut Frame, app: &App) {
     let untracked_list =
         List::new(untracked_items).block(Block::default().borders(Borders::ALL).title("Untracked"));
     frame.render_widget(untracked_list, file_chunks[2]);
+
+    let diff_view = Paragraph::new(app.diff.as_str())
+        .block(Block::default().borders(Borders::ALL).title("Diff"))
+        .scroll((app.diff_scroll, 0));
+    frame.render_widget(diff_view, screen_chunks[1]);
 }
 
 #[cfg(test)]
