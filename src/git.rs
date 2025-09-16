@@ -165,6 +165,35 @@ pub fn commit(repo: &Repository, message: &str) -> Result<Oid, Error> {
     )
 }
 
+pub fn apply_patch_to_index(patch: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("git")
+        .arg("apply")
+        .arg("--cached")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn git apply command: {}", e))?;
+
+    { // Scoped to ensure stdin is dropped and flushed before waiting
+        let stdin = child.stdin.as_mut().ok_or("Failed to open stdin")?;
+        stdin.write_all(patch.as_bytes()).map_err(|e| format!("Failed to write patch to stdin: {}", e))?;
+    }
+
+    let output = child.wait_with_output().map_err(|e| format!("Failed to wait for git apply command: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!("git apply failed: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
 pub struct ParsedDiff {
     pub header: String,
     pub hunks: Vec<String>,
@@ -229,10 +258,49 @@ pub fn parse_diff_output(diff_output: &str) -> ParsedDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn setup_test_repo(test_name: &str) -> PathBuf {
+        let repo_path = PathBuf::from(format!("./tmp_test_repo_{}", test_name));
+        if repo_path.exists() {
+            fs::remove_dir_all(&repo_path).unwrap();
+        }
+        fs::create_dir_all(&repo_path).unwrap();
+
+        Command::new("git")
+            .arg("init")
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .arg("config")
+            .arg("user.email")
+            .arg("test@example.com")
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .arg("config")
+            .arg("user.name")
+            .arg("Test User")
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+
+        repo_path
+    }
+
+    fn teardown_test_repo(repo_path: &PathBuf) {
+        if repo_path.exists() {
+            fs::remove_dir_all(repo_path).unwrap();
+        }
+    }
 
     #[test]
     fn test_parse_diff_output() {
-        let diff_output = r#"diff --git a/file.txt b/file.txt
+        let diff_output = r###"diff --git a/file.txt b/file.txt
 index 1234567..abcdefg 100644
 ---
 +++ b/file.txt
@@ -245,7 +313,7 @@ index 1234567..abcdefg 100644
 @@ -10,2 +11,2 @@
  line 10
 -line 11 old
-+line 11 new"#;
++line 11 new"###;
 
         let parsed_diff = parse_diff_output(diff_output);
 
@@ -258,7 +326,7 @@ index 1234567..abcdefg 100644
 
     #[test]
     fn test_create_patch_from_hunk() {
-        let diff_output = r#"diff --git a/file.txt b/file.txt
+        let diff_output = r###"diff --git a/file.txt b/file.txt
 index 1234567..abcdefg 100644
 --- a/file.txt
 +++ b/file.txt
@@ -271,13 +339,13 @@ index 1234567..abcdefg 100644
 @@ -10,2 +11,2 @@
  line 10
 -line 11 old
-+line 11 new"#;
++line 11 new"###;
 
         let parsed_diff = parse_diff_output(diff_output);
 
         // Test with the first hunk (index 0)
         let patch_hunk_0 = create_patch_from_hunk(&parsed_diff, 0).unwrap();
-        let expected_patch_hunk_0 = r#"diff --git a/file.txt b/file.txt
+        let expected_patch_hunk_0 = r###"diff --git a/file.txt b/file.txt
 index 1234567..abcdefg 100644
 --- a/file.txt
 +++ b/file.txt
@@ -286,19 +354,19 @@ index 1234567..abcdefg 100644
 -line 2
 +line 2 modified
 +line 3 new
- line 3"#;
+ line 3"###;
         assert_eq!(patch_hunk_0, expected_patch_hunk_0);
 
         // Test with the second hunk (index 1)
         let patch_hunk_1 = create_patch_from_hunk(&parsed_diff, 1).unwrap();
-        let expected_patch_hunk_1 = r#"diff --git a/file.txt b/file.txt
+        let expected_patch_hunk_1 = r###"diff --git a/file.txt b/file.txt
 index 1234567..abcdefg 100644
 --- a/file.txt
 +++ b/file.txt
 @@ -10,2 +11,2 @@
  line 10
 -line 11 old
-+line 11 new"#;
++line 11 new"###;
         assert_eq!(patch_hunk_1, expected_patch_hunk_1);
 
         // Test with an out-of-bounds index
