@@ -1,6 +1,4 @@
-use git2::{
-    Commit, Diff, DiffOptions, Error, ErrorCode, Oid, Repository, Status, StatusOptions,
-};
+use git2::{Commit, Diff, DiffOptions, Error, ErrorCode, Oid, Repository, Status, StatusOptions};
 use std::path::Path;
 
 #[derive(Default, Clone)]
@@ -43,10 +41,7 @@ pub fn get_status(repo: &Repository) -> StatusFiles {
             status_files.staged.push(path.clone());
         }
         if status.intersects(
-            Status::WT_MODIFIED
-                | Status::WT_DELETED
-                | Status::WT_RENAMED
-                | Status::WT_TYPECHANGE,
+            Status::WT_MODIFIED | Status::WT_DELETED | Status::WT_RENAMED | Status::WT_TYPECHANGE,
         ) {
             status_files.not_staged.push(path.clone());
         }
@@ -71,7 +66,10 @@ pub fn get_diff(repo: &Repository, path_str: &str, file_type: FileType) -> Resul
             let full_path = repo.workdir().unwrap().join(path);
             match std::fs::read_to_string(full_path) {
                 Ok(content) => {
-                    let lines = content.lines().map(|l| format!("+{}", l)).collect::<Vec<_>>();
+                    let lines = content
+                        .lines()
+                        .map(|l| format!("+{}", l))
+                        .collect::<Vec<_>>();
                     Ok(lines.join("\n"))
                 }
                 Err(e) => Err(e.to_string()),
@@ -100,6 +98,8 @@ fn format_diff(diff: Diff) -> Result<String, String> {
     diff.print(git2::DiffFormat::Patch, |_, _, line| {
         let prefix = match line.origin() {
             '+' | '-' | '=' => line.origin().to_string(),
+            // ヘッダ系はそのまま
+            'H' | 'F' | 'B' => "".to_string(),
             _ => " ".to_string(),
         };
         diff_str.push_str(&format!(
@@ -178,19 +178,26 @@ pub fn apply_patch_to_index(patch: &str) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("Failed to spawn git apply command: {}", e))?;
 
-    { // Scoped to ensure stdin is dropped and flushed before waiting
+    {
+        // Scoped to ensure stdin is dropped and flushed before waiting
         let stdin = child.stdin.as_mut().ok_or("Failed to open stdin")?;
-        stdin.write_all(patch.as_bytes()).map_err(|e| format!("Failed to write patch to stdin: {}", e))?;
+        stdin
+            .write_all(patch.as_bytes())
+            .map_err(|e| format!("Failed to write patch to stdin: {}", e))?;
     }
 
-    let output = child.wait_with_output().map_err(|e| format!("Failed to wait for git apply command: {}", e))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to wait for git apply command: {}", e))?;
 
     if output.status.success() {
         Ok(())
     } else {
-        Err(format!("git apply failed: {}\n{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)))
+        Err(format!(
+            "git apply failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
     }
 }
 
@@ -205,6 +212,7 @@ pub fn create_patch_from_hunk(parsed_diff: &ParsedDiff, hunk_index: usize) -> Op
         patch.push_str(&parsed_diff.header);
         patch.push_str("\n");
         patch.push_str(&parsed_diff.hunks[hunk_index]);
+        patch.push_str("\n");
         Some(patch)
     } else {
         None
@@ -212,24 +220,26 @@ pub fn create_patch_from_hunk(parsed_diff: &ParsedDiff, hunk_index: usize) -> Op
 }
 
 pub fn parse_diff_output(diff_output: &str) -> ParsedDiff {
-    let mut header_lines = Vec::new();
+    let mut header = String::new();
     let mut hunks = Vec::new();
     let mut current_hunk = Vec::new();
     let mut in_hunk = false;
 
-    for line in diff_output.lines() {
-        if line.starts_with("diff --git")
-            || line.starts_with("index")
-            || line.starts_with("---")
-            || line.starts_with("+++")
-        {
-            if in_hunk {
-                hunks.push(current_hunk.join("\n"));
-                current_hunk.clear();
-                in_hunk = false;
-            }
-            header_lines.push(line.to_string());
-        } else if line.starts_with("@@") {
+    let mut lines = diff_output.lines().peekable();
+
+    // Collect header until the first hunk starts
+    while let Some(line) = lines.peek() {
+        if line.starts_with("@@") {
+            break; // Hunk starts, stop collecting header
+        }
+        header.push_str(line);
+        header.push('\n');
+        lines.next(); // Consume the line
+    }
+
+    // Process hunks
+    for line in lines {
+        if line.starts_with("@@") {
             if in_hunk {
                 hunks.push(current_hunk.join("\n"));
                 current_hunk.clear();
@@ -238,10 +248,6 @@ pub fn parse_diff_output(diff_output: &str) -> ParsedDiff {
             current_hunk.push(line.to_string());
         } else if in_hunk {
             current_hunk.push(line.to_string());
-        } else {
-            // This case should ideally not be reached if the diff format is consistent,
-            // but it's here for robustness.
-            header_lines.push(line.to_string());
         }
     }
 
@@ -249,10 +255,12 @@ pub fn parse_diff_output(diff_output: &str) -> ParsedDiff {
         hunks.push(current_hunk.join("\n"));
     }
 
-    ParsedDiff {
-        header: header_lines.join("\n"),
-        hunks,
+    // Remove trailing newline from header if present
+    if header.ends_with('\n') {
+        header.pop();
     }
+
+    ParsedDiff { header, hunks }
 }
 
 #[cfg(test)]
@@ -317,11 +325,20 @@ index 1234567..abcdefg 100644
 
         let parsed_diff = parse_diff_output(diff_output);
 
-        assert_eq!(parsed_diff.header, "diff --git a/file.txt b/file.txt\nindex 1234567..abcdefg 100644\n---
-+++ b/file.txt");
+        assert_eq!(
+            parsed_diff.header,
+            "diff --git a/file.txt b/file.txt\nindex 1234567..abcdefg 100644\n---
++++ b/file.txt"
+        );
         assert_eq!(parsed_diff.hunks.len(), 2);
-        assert_eq!(parsed_diff.hunks[0], "@@ -1,3 +1,4 @@\n line 1\n-line 2\n+line 2 modified\n+line 3 new\n line 3");
-        assert_eq!(parsed_diff.hunks[1], "@@ -10,2 +11,2 @@\n line 10\n-line 11 old\n+line 11 new");
+        assert_eq!(
+            parsed_diff.hunks[0],
+            "@@ -1,3 +1,4 @@\n line 1\n-line 2\n+line 2 modified\n+line 3 new\n line 3"
+        );
+        assert_eq!(
+            parsed_diff.hunks[1],
+            "@@ -10,2 +11,2 @@\n line 10\n-line 11 old\n+line 11 new"
+        );
     }
 
     #[test]
@@ -373,5 +390,116 @@ index 1234567..abcdefg 100644
         let patch_out_of_bounds = create_patch_from_hunk(&parsed_diff, 2);
         assert!(patch_out_of_bounds.is_none());
     }
-}
 
+    #[test]
+    fn test_apply_patch_to_index() {
+        let repo_path = setup_test_repo("apply_patch_to_index");
+        let repo = Repository::open(&repo_path).unwrap();
+
+        // 1. Create a file and commit it
+        let file_path = repo_path.join("test_file.txt");
+        fs::write(
+            &file_path,
+            "line 1
+line 2
+line 3
+line 4
+line 5
+line 6
+line 7
+line 8
+line 9
+line 10
+line 11
+line 12
+line 13
+line 14
+line 15
+",
+        )
+        .unwrap();
+        stage(&repo, "test_file.txt").unwrap();
+        commit(&repo, "Initial commit").unwrap();
+
+        // 2. Modify the file to create a diff with multiple hunks
+        fs::write(
+            &file_path,
+            "line 1 modified
+line 2
+line 3
+line 4
+line 5
+line 6
+line 7
+line 8
+line 9
+line 10
+line 11
+line 12
+line 13
+line 14
+line 15 modified
+",
+        )
+        .unwrap();
+
+        // 3. Get the diff from workdir to index
+        let diff_output = get_diff(&repo, "test_file.txt", FileType::NotStaged).unwrap();
+        println!("Diff Output:\n{}", diff_output);
+        let parsed_diff = parse_diff_output(&diff_output);
+        println!("Number of hunks: {}", parsed_diff.hunks.len());
+
+        // Ensure there are at least two hunks for testing
+        assert!(
+            parsed_diff.hunks.len() >= 2,
+            "Expected at least two hunks for testing apply_patch_to_index"
+        );
+
+        // 4. Create a patch for the first hunk
+        let patch_hunk_0 = create_patch_from_hunk(&parsed_diff, 0).unwrap();
+        println!("Patch Hunk 0:\n```{}```", patch_hunk_0);
+
+        // 5. Apply the patch to the index
+        apply_patch_to_index(&patch_hunk_0).unwrap();
+
+        // 6. Verify the index status
+        let status_files = get_status(&repo);
+        assert!(status_files.staged.contains(&"test_file.txt".to_string()));
+        // The workdir still has the original changes, so it should still be not_staged
+        assert!(
+            status_files
+                .not_staged
+                .contains(&"test_file.txt".to_string())
+        );
+
+        // Verify the content of the staged file (index)
+        let head_tree = repo.head().unwrap().peel_to_tree().unwrap();
+        let diff_index_to_head = repo
+            .diff_tree_to_index(Some(&head_tree), None, None)
+            .unwrap();
+        let mut staged_diff_str = String::new();
+        diff_index_to_head
+            .print(git2::DiffFormat::Patch, |_, _, line| {
+                let prefix = match line.origin() {
+                    '+' | '-' | '=' => line.origin().to_string(),
+                    // ヘッダ系はそのまま
+                    'H' | 'F' | 'B' => "".to_string(),
+                    _ => " ".to_string(),
+                };
+                staged_diff_str.push_str(&format!(
+                    "{}{}",
+                    prefix,
+                    String::from_utf8_lossy(line.content())
+                ));
+                true
+            })
+            .unwrap();
+
+        // The staged_diff_str should contain only the first hunk's changes
+        // Note: The index hash will be different, so we only compare the hunk part
+        assert!(staged_diff_str.contains(&parsed_diff.hunks[0]));
+
+        // Clean up
+        teardown_test_repo(&repo_path);
+    }
+}
