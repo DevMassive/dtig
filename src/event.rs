@@ -53,6 +53,9 @@ pub fn handle_key_event(app: &mut App, key_code: KeyCode, diff_view_height: u16)
                     }
                 }
             }
+            KeyCode::Enter => {
+                app.apply_hunk();
+            }
             _ => {}
         },
     }

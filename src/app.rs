@@ -15,6 +15,7 @@ pub struct App<'a> {
     pub commit_message: String,
     pub focus: FocusArea,
     pub diff: String,
+    pub parsed_diff: Option<git::ParsedDiff>,
     pub diff_scroll: u16,
     pub diff_selected_line: usize,
 }
@@ -29,6 +30,7 @@ impl<'a> App<'a> {
             commit_message: String::new(),
             focus: FocusArea::Files,
             diff: String::new(),
+            parsed_diff: None,
             diff_scroll: 0,
             diff_selected_line: 0,
         };
@@ -75,10 +77,17 @@ impl<'a> App<'a> {
     pub fn update_diff(&mut self) {
         let diff_text = if let Some((path, file_type)) = self.get_selected_file() {
             match git::get_diff(self.repo, &path, file_type) {
-                Ok(text) => text,
-                Err(e) => format!("Failed to generate diff: {e}"),
+                Ok(text) => {
+                    self.parsed_diff = Some(git::parse_diff_output(&text));
+                    text
+                }
+                Err(e) => {
+                    self.parsed_diff = None;
+                    format!("Failed to generate diff: {e}")
+                }
             }
         } else {
+            self.parsed_diff = None;
             String::new()
         };
 
@@ -125,6 +134,22 @@ impl<'a> App<'a> {
         {
             self.commit_message.clear();
             self.update_status();
+        }
+    }
+
+    pub fn apply_hunk(&mut self) {
+        if let Some(parsed_diff) = &self.parsed_diff {
+            if let Some(hunk_index) = git::get_hunk_index_from_line(
+                parsed_diff,
+                self.diff_selected_line.saturating_sub(self.diff_scroll as usize),
+            ) {
+                if let Some(patch) = git::create_patch_from_hunk(parsed_diff, hunk_index) {
+                    let repo_path = self.repo.path().parent().unwrap();
+                    if git::apply_patch_to_index(repo_path, &patch).is_ok() {
+                        self.update_status();
+                    }
+                }
+            }
         }
     }
 }
