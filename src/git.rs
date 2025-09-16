@@ -164,3 +164,84 @@ pub fn commit(repo: &Repository, message: &str) -> Result<Oid, Error> {
         &parents,
     )
 }
+
+pub struct ParsedDiff {
+    pub header: String,
+    pub hunks: Vec<String>,
+}
+
+pub fn parse_diff_output(diff_output: &str) -> ParsedDiff {
+    let mut header_lines = Vec::new();
+    let mut hunks = Vec::new();
+    let mut current_hunk = Vec::new();
+    let mut in_hunk = false;
+
+    for line in diff_output.lines() {
+        if line.starts_with("diff --git")
+            || line.starts_with("index")
+            || line.starts_with("---")
+            || line.starts_with("+++")
+        {
+            if in_hunk {
+                hunks.push(current_hunk.join("\n"));
+                current_hunk.clear();
+                in_hunk = false;
+            }
+            header_lines.push(line.to_string());
+        } else if line.starts_with("@@") {
+            if in_hunk {
+                hunks.push(current_hunk.join("\n"));
+                current_hunk.clear();
+            }
+            in_hunk = true;
+            current_hunk.push(line.to_string());
+        } else if in_hunk {
+            current_hunk.push(line.to_string());
+        } else {
+            // This case should ideally not be reached if the diff format is consistent,
+            // but it's here for robustness.
+            header_lines.push(line.to_string());
+        }
+    }
+
+    if in_hunk {
+        hunks.push(current_hunk.join("\n"));
+    }
+
+    ParsedDiff {
+        header: header_lines.join("\n"),
+        hunks,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_diff_output() {
+        let diff_output = r#"diff --git a/file.txt b/file.txt
+index 1234567..abcdefg 100644
+---
++++ b/file.txt
+@@ -1,3 +1,4 @@
+ line 1
+-line 2
++line 2 modified
++line 3 new
+ line 3
+@@ -10,2 +11,2 @@
+ line 10
+-line 11 old
++line 11 new"#;
+
+        let parsed_diff = parse_diff_output(diff_output);
+
+        assert_eq!(parsed_diff.header, "diff --git a/file.txt b/file.txt\nindex 1234567..abcdefg 100644\n---
++++ b/file.txt");
+        assert_eq!(parsed_diff.hunks.len(), 2);
+        assert_eq!(parsed_diff.hunks[0], "@@ -1,3 +1,4 @@\n line 1\n-line 2\n+line 2 modified\n+line 3 new\n line 3");
+        assert_eq!(parsed_diff.hunks[1], "@@ -10,2 +11,2 @@\n line 10\n-line 11 old\n+line 11 new");
+    }
+}
+
