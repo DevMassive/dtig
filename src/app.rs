@@ -63,8 +63,7 @@ impl<'a> App<'a> {
             ))
         } else if self.selected_index < self.status.total_files() {
             Some((
-                self.status.untracked
-                    [self.selected_index - total_staged - total_not_staged]
+                self.status.untracked[self.selected_index - total_staged - total_not_staged]
                     .clone(),
                 FileType::Untracked,
             ))
@@ -77,7 +76,7 @@ impl<'a> App<'a> {
         let diff_text = if let Some((path, file_type)) = self.get_selected_file() {
             match git::get_diff(self.repo, &path, file_type) {
                 Ok(text) => text,
-                Err(e) => format!("Failed to generate diff: {}", e),
+                Err(e) => format!("Failed to generate diff: {e}"),
             }
         } else {
             String::new()
@@ -121,11 +120,11 @@ impl<'a> App<'a> {
     }
 
     pub fn commit(&mut self) {
-        if !self.commit_message.is_empty() {
-            if git::commit(self.repo, &self.commit_message.clone()).is_ok() {
-                self.commit_message.clear();
-                self.update_status();
-            }
+        if !self.commit_message.is_empty()
+            && git::commit(self.repo, &self.commit_message.clone()).is_ok()
+        {
+            self.commit_message.clear();
+            self.update_status();
         }
     }
 }

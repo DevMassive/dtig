@@ -1,7 +1,6 @@
-use git2::{
-    Commit, Diff, DiffOptions, Error, ErrorCode, Oid, Repository, Status, StatusOptions,
-};
-use std::path::Path;
+use git2::{Commit, Diff, DiffOptions, Error, ErrorCode, Oid, Repository, Status, StatusOptions};
+use std::cell::RefCell;
+use std::{io::Read, path::Path};
 
 #[derive(Default, Clone)]
 pub struct StatusFiles {
@@ -43,10 +42,7 @@ pub fn get_status(repo: &Repository) -> StatusFiles {
             status_files.staged.push(path.clone());
         }
         if status.intersects(
-            Status::WT_MODIFIED
-                | Status::WT_DELETED
-                | Status::WT_RENAMED
-                | Status::WT_TYPECHANGE,
+            Status::WT_MODIFIED | Status::WT_DELETED | Status::WT_RENAMED | Status::WT_TYPECHANGE,
         ) {
             status_files.not_staged.push(path.clone());
         }
@@ -71,7 +67,7 @@ pub fn get_diff(repo: &Repository, path_str: &str, file_type: FileType) -> Resul
             let full_path = repo.workdir().unwrap().join(path);
             match std::fs::read_to_string(full_path) {
                 Ok(content) => {
-                    let lines = content.lines().map(|l| format!("+{}", l)).collect::<Vec<_>>();
+                    let lines = content.lines().map(|l| format!("+{l}")).collect::<Vec<_>>();
                     Ok(lines.join("\n"))
                 }
                 Err(e) => Err(e.to_string()),
@@ -96,21 +92,57 @@ pub fn get_diff(repo: &Repository, path_str: &str, file_type: FileType) -> Resul
 }
 
 fn format_diff(diff: Diff) -> Result<String, String> {
-    let mut diff_str = String::new();
-    diff.print(git2::DiffFormat::Patch, |_, _, line| {
-        let prefix = match line.origin() {
-            '+' | '-' | '=' => line.origin().to_string(),
-            _ => " ".to_string(),
-        };
-        diff_str.push_str(&format!(
-            "{}{}",
-            prefix,
-            String::from_utf8_lossy(line.content())
-        ));
-        true
-    })
+    let diff_str = RefCell::new(String::new());
+    diff.foreach(
+        &mut |delta, _| {
+            let mut diff_str = diff_str.borrow_mut();
+            let old_path = delta
+                .old_file()
+                .path()
+                .map_or("".to_string(), |p| p.to_string_lossy().to_string());
+            let new_path = delta
+                .new_file()
+                .path()
+                .map_or("".to_string(), |p| p.to_string_lossy().to_string());
+
+            if !old_path.is_empty() && !new_path.is_empty() && old_path != new_path {
+                diff_str.push_str(&format!("diff --git a/{old_path} b/{new_path}\n"));
+            }
+            if !old_path.is_empty() {
+                diff_str.push_str(&format!("--- a/{old_path}\n"));
+            } else {
+                diff_str.push_str("--- /dev/null\n");
+            }
+            if !new_path.is_empty() {
+                diff_str.push_str(&format!("+++ b/{new_path}\n"));
+            } else {
+                diff_str.push_str("+++ /dev/null\n");
+            }
+            true
+        },
+        None,
+        Some(&mut |delta, hunk| {
+            let mut diff_str = diff_str.borrow_mut();
+            diff_str.push_str(&String::from_utf8_lossy(hunk.header()));
+            true
+        }),
+        Some(&mut |delta, hunk, line| {
+            let mut diff_str = diff_str.borrow_mut();
+            let prefix = match line.origin() {
+                '+' | '-' | '=' => line.origin().to_string(),
+                _ => " ".to_string(),
+            };
+            diff_str.push_str(&format!(
+                "{}{}",
+                prefix,
+                String::from_utf8_lossy(line.content())
+            ));
+            true
+        }),
+    )
     .map_err(|e| e.to_string())?;
-    Ok(diff_str)
+
+    Ok(diff_str.into_inner())
 }
 
 pub fn stage(repo: &Repository, path_str: &str) -> Result<(), Error> {
