@@ -22,7 +22,7 @@ fn main() -> io::Result<()> {
         Ok(repo) => repo,
         Err(e) => {
             cleanup_terminal()?;
-            eprintln!("Failed to open repository: {}", e);
+            eprintln!("Failed to open repository: {e}");
             return Ok(());
         }
     };
@@ -32,9 +32,12 @@ fn main() -> io::Result<()> {
 
     while !app.should_quit {
         terminal.draw(|f| ui(f, &app))?;
+        let frame_size = terminal.get_frame().area();
+        let diff_view_height = frame_size.height.saturating_sub(2);
+
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
-                handle_key_event(&mut app, key.code);
+                handle_key_event(&mut app, key.code, diff_view_height);
             }
         }
     }
@@ -43,7 +46,7 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn handle_key_event(app: &mut App, key_code: KeyCode) {
+fn handle_key_event(app: &mut App, key_code: KeyCode, diff_view_height: u16) {
     match app.focus {
         FocusArea::Commit => match key_code {
             KeyCode::Char('q') => app.should_quit = true,
@@ -52,11 +55,10 @@ fn handle_key_event(app: &mut App, key_code: KeyCode) {
                 app.commit_message.pop();
             }
             KeyCode::Enter => {
-                if !app.commit_message.is_empty() {
-                    if app.commit(&app.commit_message.clone()).is_ok() {
-                        app.commit_message.clear();
-                        app.update_status();
-                    }
+                if !app.commit_message.is_empty() && app.commit(&app.commit_message.clone()).is_ok()
+                {
+                    app.commit_message.clear();
+                    app.update_status();
                 }
             }
             KeyCode::Down => app.focus = FocusArea::Files,
@@ -76,8 +78,35 @@ fn handle_key_event(app: &mut App, key_code: KeyCode) {
                 app.toggle_selection();
                 app.update_status();
             }
-            KeyCode::Char('j') => app.diff_scroll = app.diff_scroll.saturating_add(1),
-            KeyCode::Char('k') => app.diff_scroll = app.diff_scroll.saturating_sub(1),
+            KeyCode::Right => app.focus = FocusArea::Diff,
+            _ => {}
+        },
+        FocusArea::Diff => match key_code {
+            KeyCode::Char('q') => app.should_quit = true,
+            KeyCode::Left => app.focus = FocusArea::Files,
+            KeyCode::Down => {
+                let diff_lines = app.diff.lines().count();
+                if diff_lines > 0 {
+                    app.diff_selected_line = (app.diff_selected_line + 1).min(diff_lines - 1);
+                    // Adjust diff_scroll to keep selected line in view
+                    // This logic will be refined in ui function
+                    if app.diff_selected_line
+                        >= (app.diff_scroll as usize + diff_view_height as usize)
+                    {
+                        app.diff_scroll = app.diff_scroll.saturating_add(1);
+                    }
+                }
+            }
+            KeyCode::Up => {
+                if app.diff_selected_line > 0 {
+                    app.diff_selected_line -= 1;
+                    // Adjust diff_scroll to keep selected line in view
+                    // This logic will be refined in ui function
+                    if app.diff_selected_line < app.diff_scroll as usize {
+                        app.diff_scroll = app.diff_scroll.saturating_sub(1);
+                    }
+                }
+            }
             _ => {}
         },
     }
@@ -89,7 +118,11 @@ fn cleanup_terminal() -> io::Result<()> {
     Ok(())
 }
 
-enum FocusArea { Commit, Files }
+enum FocusArea {
+    Commit,
+    Files,
+    Diff,
+}
 
 struct App {
     repo: Repository,
@@ -102,6 +135,7 @@ struct App {
     focus: FocusArea,
     diff: String,
     diff_scroll: u16,
+    diff_selected_line: usize,
 }
 
 impl App {
@@ -117,6 +151,7 @@ impl App {
             focus: FocusArea::Files,
             diff: String::new(),
             diff_scroll: 0,
+            diff_selected_line: 0,
         }
     }
 
@@ -130,7 +165,10 @@ impl App {
             } else if self.selected_index < total_staged + total_not_staged {
                 Some(self.not_staged_files[self.selected_index - total_staged].clone())
             } else if self.selected_index < self.total_files() {
-                Some(self.untracked_files[self.selected_index - total_staged - total_not_staged].clone())
+                Some(
+                    self.untracked_files[self.selected_index - total_staged - total_not_staged]
+                        .clone(),
+                )
             } else {
                 None
             }
@@ -146,7 +184,7 @@ impl App {
                 let full_path = self.repo.workdir().unwrap().join(path);
                 match std::fs::read_to_string(full_path) {
                     Ok(content) => {
-                        let lines = content.lines().map(|l| format!("+{}", l)).collect::<Vec<_>>();
+                        let lines = content.lines().map(|l| format!("+{l}")).collect::<Vec<_>>();
                         Ok(lines.join("\n"))
                     }
                     Err(e) => Err(e.to_string()),
@@ -157,7 +195,8 @@ impl App {
 
                 let diff = if is_staged {
                     let head_tree = self.repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-                    self.repo.diff_tree_to_index(head_tree.as_ref(), None, Some(diff_opts))
+                    self.repo
+                        .diff_tree_to_index(head_tree.as_ref(), None, Some(diff_opts))
                 } else {
                     self.repo.diff_index_to_workdir(None, Some(diff_opts))
                 };
@@ -170,9 +209,14 @@ impl App {
                                 '+' | '-' | '=' => line.origin().to_string(),
                                 _ => " ".to_string(),
                             };
-                            diff_str.push_str(&format!("{}{}", prefix, String::from_utf8_lossy(line.content())));
+                            diff_str.push_str(&format!(
+                                "{}{}",
+                                prefix,
+                                String::from_utf8_lossy(line.content())
+                            ));
                             true
-                        }).unwrap();
+                        })
+                        .unwrap();
                         Ok(diff_str)
                     }
                     Err(e) => Err(e.to_string()),
@@ -181,7 +225,7 @@ impl App {
 
             match diff_result {
                 Ok(text) => text,
-                Err(e) => format!("Failed to generate diff: {}", e),
+                Err(e) => format!("Failed to generate diff: {e}"),
             }
         } else {
             String::new()
@@ -292,7 +336,7 @@ impl App {
                     // HEAD exists. Peel it to a commit, get its tree, and reset the index from there.
                     if let Ok(commit) = head.peel_to_commit() {
                         self.repo
-                            .reset_default(Some(commit.as_object()), &[path])
+                            .reset_default(Some(commit.as_object()), [path])
                             .unwrap();
                     }
                 }
@@ -360,7 +404,9 @@ fn ui(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(screen_chunks[0]);
 
-    let input_block = Block::default().borders(Borders::ALL).title("Commit Message");
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .title("Commit Message");
     let input = Paragraph::new(app.commit_message.as_str())
         .style(match app.focus {
             FocusArea::Commit => Style::default().fg(Color::Yellow),
@@ -443,10 +489,36 @@ fn ui(frame: &mut Frame, app: &App) {
         List::new(untracked_items).block(Block::default().borders(Borders::ALL).title("Untracked"));
     frame.render_widget(untracked_list, file_chunks[2]);
 
-    let diff_view = Paragraph::new(app.diff.as_str())
+    let diff_area = screen_chunks[1];
+    let _diff_content_height = diff_area.height.saturating_sub(2);
+
+    let mut diff_text_spans = Vec::new();
+    let _diff_lines_count = app.diff.lines().count();
+
+    for (i, line) in app.diff.lines().enumerate() {
+        let mut style = Style::default();
+        if let FocusArea::Diff = app.focus {
+            if i == app.diff_selected_line {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+        }
+        diff_text_spans.push(Line::from(Span::styled(line, style)));
+    }
+
+    let diff_view = Paragraph::new(diff_text_spans)
         .block(Block::default().borders(Borders::ALL).title("Diff"))
         .scroll((app.diff_scroll, 0));
-    frame.render_widget(diff_view, screen_chunks[1]);
+    frame.render_widget(diff_view, diff_area);
+
+    if let FocusArea::Diff = app.focus {
+        let cursor_x = diff_area.x + 1;
+        let cursor_y =
+            diff_area.y + 1 + (app.diff_selected_line as u16).saturating_sub(app.diff_scroll);
+
+        if cursor_y > diff_area.y && cursor_y < diff_area.y + diff_area.height.saturating_sub(1) {
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -671,11 +743,11 @@ mod tests {
         assert_eq!(app.selected_index, 0);
 
         // Press Up at index 0 -> focus moves to Commit
-        handle_key_event(&mut app, KeyCode::Up);
+        handle_key_event(&mut app, KeyCode::Up, 10);
         assert!(matches!(app.focus, FocusArea::Commit));
 
         // Press Down -> focus moves back to Files
-        handle_key_event(&mut app, KeyCode::Down);
+        handle_key_event(&mut app, KeyCode::Down, 10);
         assert!(matches!(app.focus, FocusArea::Files));
         assert_eq!(app.selected_index, 0);
     }
@@ -688,18 +760,18 @@ mod tests {
         app.focus = FocusArea::Commit;
 
         // Type a message
-        handle_key_event(&mut app, KeyCode::Char('t'));
-        handle_key_event(&mut app, KeyCode::Char('e'));
-        handle_key_event(&mut app, KeyCode::Char('s'));
-        handle_key_event(&mut app, KeyCode::Char('t'));
+        handle_key_event(&mut app, KeyCode::Char('t'), 10);
+        handle_key_event(&mut app, KeyCode::Char('e'), 10);
+        handle_key_event(&mut app, KeyCode::Char('s'), 10);
+        handle_key_event(&mut app, KeyCode::Char('t'), 10);
         assert_eq!(app.commit_message, "test");
 
         // Backspace
-        handle_key_event(&mut app, KeyCode::Backspace);
+        handle_key_event(&mut app, KeyCode::Backspace, 10);
         assert_eq!(app.commit_message, "tes");
 
         // Quit
-        handle_key_event(&mut app, KeyCode::Char('q'));
+        handle_key_event(&mut app, KeyCode::Char('q'), 10);
         assert!(app.should_quit)
     }
 
@@ -707,7 +779,7 @@ mod tests {
     fn test_file_navigation_does_not_switch_focus() {
         let temp_dir = TempDir::new().unwrap();
         let repo = setup_repo(&temp_dir);
-        
+
         // Add two files
         File::create(temp_dir.path().join("file1.txt")).unwrap();
         File::create(temp_dir.path().join("file2.txt")).unwrap();
@@ -719,7 +791,7 @@ mod tests {
         app.selected_index = 1; // Start at the second file
 
         // Press Up, should not change focus
-        handle_key_event(&mut app, KeyCode::Up);
+        handle_key_event(&mut app, KeyCode::Up, 10);
         assert!(matches!(app.focus, FocusArea::Files));
         assert_eq!(app.selected_index, 0);
     }
@@ -741,7 +813,15 @@ mod tests {
         let tree = repo.find_tree(tree_oid).unwrap();
         let signature = repo.signature().unwrap();
         let parent_commit = repo.head().unwrap().peel_to_commit().unwrap();
-        repo.commit(Some("HEAD"), &signature, &signature, "add staged.txt", &tree, &[&parent_commit]).unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "add staged.txt",
+            &tree,
+            &[&parent_commit],
+        )
+        .unwrap();
 
         // 2. Create and commit a file for the not-staged test
         let not_staged_path = temp_dir.path().join("not_staged.txt");
@@ -752,7 +832,15 @@ mod tests {
         let tree_oid = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_oid).unwrap();
         let parent_commit = repo.head().unwrap().peel_to_commit().unwrap();
-        repo.commit(Some("HEAD"), &signature, &signature, "add not_staged.txt", &tree, &[&parent_commit]).unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "add not_staged.txt",
+            &tree,
+            &[&parent_commit],
+        )
+        .unwrap();
 
         // 3. Modify the files
         writeln!(staged_file, "line2").unwrap(); // Modified
@@ -772,21 +860,45 @@ mod tests {
         app.update_status();
 
         // Test diff for staged file
-        let staged_index = app.staged_files.iter().position(|r| r == "staged.txt").unwrap();
+        let staged_index = app
+            .staged_files
+            .iter()
+            .position(|r| r == "staged.txt")
+            .unwrap();
         app.selected_index = staged_index;
         app.update_diff();
-        assert!(app.diff.contains("\n+line2"), "Diff for staged was: '{}'", app.diff);
+        assert!(
+            app.diff.contains("\n+line2"),
+            "Diff for staged was: '{}'",
+            app.diff
+        );
 
         // Test diff for not-staged file
-        let not_staged_index = app.not_staged_files.iter().position(|r| r == "not_staged.txt").unwrap();
+        let not_staged_index = app
+            .not_staged_files
+            .iter()
+            .position(|r| r == "not_staged.txt")
+            .unwrap();
         app.selected_index = app.staged_files.len() + not_staged_index;
         app.update_diff();
-        assert!(app.diff.contains("\n+def"), "Diff for not-staged was: '{}'", app.diff);
+        assert!(
+            app.diff.contains("\n+def"),
+            "Diff for not-staged was: '{}'",
+            app.diff
+        );
 
         // Test diff for untracked file
-        let untracked_index = app.untracked_files.iter().position(|r| r == "untracked.txt").unwrap();
+        let untracked_index = app
+            .untracked_files
+            .iter()
+            .position(|r| r == "untracked.txt")
+            .unwrap();
         app.selected_index = app.staged_files.len() + app.not_staged_files.len() + untracked_index;
         app.update_diff();
-        assert!(app.diff.contains("+new"), "Diff for untracked was: '{}'", app.diff);
+        assert!(
+            app.diff.contains("+new"),
+            "Diff for untracked was: '{}'",
+            app.diff
+        );
     }
 }
