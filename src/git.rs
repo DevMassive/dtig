@@ -170,6 +170,18 @@ pub struct ParsedDiff {
     pub hunks: Vec<String>,
 }
 
+pub fn create_patch_from_hunk(parsed_diff: &ParsedDiff, hunk_index: usize) -> Option<String> {
+    if hunk_index < parsed_diff.hunks.len() {
+        let mut patch = String::new();
+        patch.push_str(&parsed_diff.header);
+        patch.push_str("\n");
+        patch.push_str(&parsed_diff.hunks[hunk_index]);
+        Some(patch)
+    } else {
+        None
+    }
+}
+
 pub fn parse_diff_output(diff_output: &str) -> ParsedDiff {
     let mut header_lines = Vec::new();
     let mut hunks = Vec::new();
@@ -242,6 +254,56 @@ index 1234567..abcdefg 100644
         assert_eq!(parsed_diff.hunks.len(), 2);
         assert_eq!(parsed_diff.hunks[0], "@@ -1,3 +1,4 @@\n line 1\n-line 2\n+line 2 modified\n+line 3 new\n line 3");
         assert_eq!(parsed_diff.hunks[1], "@@ -10,2 +11,2 @@\n line 10\n-line 11 old\n+line 11 new");
+    }
+
+    #[test]
+    fn test_create_patch_from_hunk() {
+        let diff_output = r#"diff --git a/file.txt b/file.txt
+index 1234567..abcdefg 100644
+--- a/file.txt
++++ b/file.txt
+@@ -1,3 +1,4 @@
+ line 1
+-line 2
++line 2 modified
++line 3 new
+ line 3
+@@ -10,2 +11,2 @@
+ line 10
+-line 11 old
++line 11 new"#;
+
+        let parsed_diff = parse_diff_output(diff_output);
+
+        // Test with the first hunk (index 0)
+        let patch_hunk_0 = create_patch_from_hunk(&parsed_diff, 0).unwrap();
+        let expected_patch_hunk_0 = r#"diff --git a/file.txt b/file.txt
+index 1234567..abcdefg 100644
+--- a/file.txt
++++ b/file.txt
+@@ -1,3 +1,4 @@
+ line 1
+-line 2
++line 2 modified
++line 3 new
+ line 3"#;
+        assert_eq!(patch_hunk_0, expected_patch_hunk_0);
+
+        // Test with the second hunk (index 1)
+        let patch_hunk_1 = create_patch_from_hunk(&parsed_diff, 1).unwrap();
+        let expected_patch_hunk_1 = r#"diff --git a/file.txt b/file.txt
+index 1234567..abcdefg 100644
+--- a/file.txt
++++ b/file.txt
+@@ -10,2 +11,2 @@
+ line 10
+-line 11 old
++line 11 new"#;
+        assert_eq!(patch_hunk_1, expected_patch_hunk_1);
+
+        // Test with an out-of-bounds index
+        let patch_out_of_bounds = create_patch_from_hunk(&parsed_diff, 2);
+        assert!(patch_out_of_bounds.is_none());
     }
 }
 
