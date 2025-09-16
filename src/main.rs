@@ -118,10 +118,34 @@ fn cleanup_terminal() -> io::Result<()> {
     Ok(())
 }
 
+fn format_diff(diff: git2::Diff) -> Result<String, String> {
+    let mut diff_str = String::new();
+    diff.print(git2::DiffFormat::Patch, |_, _, line| {
+        let prefix = match line.origin() {
+            '+' | '-' | '=' => line.origin().to_string(),
+            _ => " ".to_string(),
+        };
+        diff_str.push_str(&format!(
+            "{}{}",
+            prefix,
+            String::from_utf8_lossy(line.content())
+        ));
+        true
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(diff_str)
+}
+
 enum FocusArea {
     Commit,
     Files,
     Diff,
+}
+
+enum SelectedFileType {
+    Staged,
+    NotStaged,
+    Untracked,
 }
 
 struct App {
@@ -156,71 +180,66 @@ impl App {
     }
 
     fn update_diff(&mut self) {
-        let selected_path_str = {
+        let (selected_path_str, selected_file_type) = {
             let total_staged = self.staged_files.len();
             let total_not_staged = self.not_staged_files.len();
 
             if self.selected_index < total_staged {
-                Some(self.staged_files[self.selected_index].clone())
+                (
+                    Some(self.staged_files[self.selected_index].clone()),
+                    Some(SelectedFileType::Staged),
+                )
             } else if self.selected_index < total_staged + total_not_staged {
-                Some(self.not_staged_files[self.selected_index - total_staged].clone())
+                (
+                    Some(self.not_staged_files[self.selected_index - total_staged].clone()),
+                    Some(SelectedFileType::NotStaged),
+                )
             } else if self.selected_index < self.total_files() {
-                Some(
-                    self.untracked_files[self.selected_index - total_staged - total_not_staged]
-                        .clone(),
+                (
+                    Some(
+                        self.untracked_files[self.selected_index - total_staged - total_not_staged]
+                            .clone(),
+                    ),
+                    Some(SelectedFileType::Untracked),
                 )
             } else {
-                None
+                (None, None)
             }
         };
 
         let diff_text = if let Some(path_str) = selected_path_str {
             let path = Path::new(&path_str);
-            let is_staged = self.staged_files.contains(&path_str);
-            let is_untracked = self.untracked_files.contains(&path_str);
-
-            let diff_result = if is_untracked {
-                // For untracked files, show the whole file as an addition
-                let full_path = self.repo.workdir().unwrap().join(path);
-                match std::fs::read_to_string(full_path) {
-                    Ok(content) => {
-                        let lines = content.lines().map(|l| format!("+{l}")).collect::<Vec<_>>();
-                        Ok(lines.join("\n"))
+            let diff_result = match selected_file_type {
+                Some(SelectedFileType::Untracked) => {
+                    // For untracked files, show the whole file as an addition
+                    let full_path = self.repo.workdir().unwrap().join(path);
+                    match std::fs::read_to_string(full_path) {
+                        Ok(content) => {
+                            let lines =
+                                content.lines().map(|l| format!("+{l}")).collect::<Vec<_>>();
+                            Ok(lines.join("\n"))
+                        }
+                        Err(e) => Err(e.to_string()),
                     }
-                    Err(e) => Err(e.to_string()),
                 }
-            } else {
-                let diff_opts = &mut git2::DiffOptions::new();
-                diff_opts.pathspec(path);
-
-                let diff = if is_staged {
+                Some(SelectedFileType::Staged) => {
+                    let diff_opts = &mut git2::DiffOptions::new();
+                    diff_opts.pathspec(path);
                     let head_tree = self.repo.head().ok().and_then(|h| h.peel_to_tree().ok());
                     self.repo
                         .diff_tree_to_index(head_tree.as_ref(), None, Some(diff_opts))
-                } else {
-                    self.repo.diff_index_to_workdir(None, Some(diff_opts))
-                };
-
-                match diff {
-                    Ok(diff) => {
-                        let mut diff_str = String::new();
-                        diff.print(git2::DiffFormat::Patch, |_, _, line| {
-                            let prefix = match line.origin() {
-                                '+' | '-' | '=' => line.origin().to_string(),
-                                _ => " ".to_string(),
-                            };
-                            diff_str.push_str(&format!(
-                                "{}{}",
-                                prefix,
-                                String::from_utf8_lossy(line.content())
-                            ));
-                            true
-                        })
-                        .unwrap();
-                        Ok(diff_str)
-                    }
-                    Err(e) => Err(e.to_string()),
+                        .map_err(|e| e.to_string())
+                        .and_then(format_diff)
                 }
+                Some(SelectedFileType::NotStaged) => {
+                    let diff_opts = &mut git2::DiffOptions::new();
+                    diff_opts.pathspec(path);
+                    self.repo
+                        .diff_index_to_workdir(None, Some(diff_opts))
+                        .map_err(|e| e.to_string())
+                        .and_then(format_diff)
+                }
+                None => Err("No file selected".to_string()),
             };
 
             match diff_result {
@@ -397,7 +416,7 @@ impl App {
 fn ui(frame: &mut Frame, app: &App) {
     let screen_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
         .split(frame.area());
 
     let left_chunks = Layout::default()
