@@ -1,6 +1,6 @@
 use git2::{Commit, Diff, DiffOptions, Error, ErrorCode, Oid, Repository, Status, StatusOptions};
 use std::cell::RefCell;
-use std::{path::Path};
+use std::{io::Read, path::Path};
 
 #[derive(Default, Clone)]
 pub struct StatusFiles {
@@ -77,21 +77,21 @@ pub fn get_diff(repo: &Repository, path_str: &str, file_type: FileType) -> Resul
             let mut diff_opts = DiffOptions::new();
             diff_opts.pathspec(path);
             let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-            let diff = repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut diff_opts))
-                .map_err(|e| e.to_string())?;
-            format_diff(diff, None)
+            repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut diff_opts))
+                .map_err(|e| e.to_string())
+                .and_then(format_diff)
         }
         FileType::NotStaged => {
             let mut diff_opts = DiffOptions::new();
             diff_opts.pathspec(path);
-            let diff = repo.diff_index_to_workdir(None, Some(&mut diff_opts))
-                .map_err(|e| e.to_string())?;
-            format_diff(diff, None)
+            repo.diff_index_to_workdir(None, Some(&mut diff_opts))
+                .map_err(|e| e.to_string())
+                .and_then(format_diff)
         }
     }
 }
 
-fn format_diff(diff: Diff, line_number: Option<usize>) -> Result<String, String> {
+fn format_diff(diff: Diff) -> Result<String, String> {
     let diff_str = RefCell::new(String::new());
     diff.foreach(
         &mut |delta, _| {
@@ -121,19 +121,12 @@ fn format_diff(diff: Diff, line_number: Option<usize>) -> Result<String, String>
             true
         },
         None,
-        Some(&mut |_delta, hunk| {
-            if let Some(line) = line_number {
-                let hunk_start_line = hunk.new_start() as usize;
-                let hunk_end_line = (hunk.new_start() + hunk.new_lines()) as usize;
-                if !(hunk_start_line <= line && line < hunk_end_line) {
-                    return true;
-                }
-            }
+        Some(&mut |delta, hunk| {
             let mut diff_str = diff_str.borrow_mut();
             diff_str.push_str(&String::from_utf8_lossy(hunk.header()));
             true
         }),
-        Some(&mut |_delta, _hunk, line| {
+        Some(&mut |delta, hunk, line| {
             let mut diff_str = diff_str.borrow_mut();
             let prefix = match line.origin() {
                 '+' | '-' | '=' => line.origin().to_string(),
