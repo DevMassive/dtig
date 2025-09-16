@@ -8,7 +8,7 @@ use crate::app::App;
 use crate::event::handle_key_event;
 use crate::tui::{init, restore};
 use git2::Repository;
-use ratatui::crossterm::event::{read, Event, KeyEventKind};
+use ratatui::crossterm::event::{Event, KeyEventKind, read};
 use std::io;
 
 fn main() -> io::Result<()> {
@@ -18,7 +18,7 @@ fn main() -> io::Result<()> {
         Ok(repo) => repo,
         Err(e) => {
             restore()?;
-            eprintln!("Failed to open repository: {}", e);
+            eprintln!("Failed to open repository: {e}");
             // Return Ok because we've handled the error gracefully by printing a message.
             return Ok(());
         }

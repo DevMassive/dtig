@@ -66,10 +66,7 @@ pub fn get_diff(repo: &Repository, path_str: &str, file_type: FileType) -> Resul
             let full_path = repo.workdir().unwrap().join(path);
             match std::fs::read_to_string(full_path) {
                 Ok(content) => {
-                    let lines = content
-                        .lines()
-                        .map(|l| format!("+{}", l))
-                        .collect::<Vec<_>>();
+                    let lines = content.lines().map(|l| format!("+{l}")).collect::<Vec<_>>();
                     Ok(lines.join("\n"))
                 }
                 Err(e) => Err(e.to_string()),
@@ -177,19 +174,19 @@ pub fn apply_patch_to_index(repo_path: &Path, patch: &str) -> Result<(), String>
         .stderr(Stdio::piped())
         .current_dir(repo_path) // Set the current directory explicitly
         .spawn()
-        .map_err(|e| format!("Failed to spawn git apply command: {}", e))?;
+        .map_err(|e| format!("Failed to spawn git apply command: {e}"))?;
 
     {
         // Scoped to ensure stdin is dropped and flushed before waiting
         let stdin = child.stdin.as_mut().ok_or("Failed to open stdin")?;
         stdin
             .write_all(patch.as_bytes())
-            .map_err(|e| format!("Failed to write patch to stdin: {}", e))?;
+            .map_err(|e| format!("Failed to write patch to stdin: {e}"))?;
     }
 
     let output = child
         .wait_with_output()
-        .map_err(|e| format!("Failed to wait for git apply command: {}", e))?;
+        .map_err(|e| format!("Failed to wait for git apply command: {e}"))?;
 
     if output.status.success() {
         Ok(())
@@ -211,9 +208,9 @@ pub fn create_patch_from_hunk(parsed_diff: &ParsedDiff, hunk_index: usize) -> Op
     if hunk_index < parsed_diff.hunks.len() {
         let mut patch = String::new();
         patch.push_str(&parsed_diff.header);
-        patch.push_str("\n");
+        patch.push('\n');
         patch.push_str(&parsed_diff.hunks[hunk_index]);
-        patch.push_str("\n");
+        patch.push('\n');
         Some(patch)
     } else {
         None
@@ -257,11 +254,33 @@ pub fn parse_diff_output(diff_output: &str) -> ParsedDiff {
     }
 
     // Remove trailing newline from header if present
-    if header.ends_with('\n') {
+    if header.ends_with("\n") {
         header.pop();
     }
 
     ParsedDiff { header, hunks }
+}
+
+pub fn get_hunk_index_from_line(parsed_diff: &ParsedDiff, cursor_line: usize) -> Option<usize> {
+    let mut current_display_line = 0;
+
+    // Check if cursor is in the header
+    let header_lines = parsed_diff.header.lines().count();
+    if cursor_line < header_lines {
+        return None; // Cursor is in the header
+    }
+    current_display_line += header_lines;
+
+    // Iterate through hunks to find the correct one
+    for (index, hunk) in parsed_diff.hunks.iter().enumerate() {
+        let hunk_lines = hunk.lines().count();
+        if cursor_line < current_display_line + hunk_lines {
+            return Some(index); // Cursor is in this hunk
+        }
+        current_display_line += hunk_lines;
+    }
+
+    None // Cursor is beyond all hunks
 }
 
 #[cfg(test)]
@@ -272,7 +291,7 @@ mod tests {
     use std::process::Command;
 
     fn setup_test_repo(test_name: &str) -> PathBuf {
-        let repo_path = PathBuf::from(format!("./tmp_test_repo_{}", test_name));
+        let repo_path = PathBuf::from(format!("./tmp_test_repo_{test_name}"));
         if repo_path.exists() {
             fs::remove_dir_all(&repo_path).unwrap();
         }
@@ -311,7 +330,7 @@ mod tests {
     fn test_parse_diff_output() {
         let diff_output = r###"diff --git a/file.txt b/file.txt
 index 1234567..abcdefg 100644
----
+--- a/file.txt
 +++ b/file.txt
 @@ -1,3 +1,4 @@
  line 1
@@ -329,17 +348,27 @@ index 1234567..abcdefg 100644
 
         assert_eq!(
             parsed_diff.header,
-            "diff --git a/file.txt b/file.txt\nindex 1234567..abcdefg 100644\n---
+            "diff --git a/file.txt b/file.txt
+index 1234567..abcdefg 100644
+--- a/file.txt
 +++ b/file.txt"
         );
         assert_eq!(parsed_diff.hunks.len(), 2);
         assert_eq!(
             parsed_diff.hunks[0],
-            "@@ -1,3 +1,4 @@\n line 1\n-line 2\n+line 2 modified\n+line 3 new\n line 3"
+            "@@ -1,3 +1,4 @@
+ line 1
+-line 2
++line 2 modified
++line 3 new
+ line 3"
         );
         assert_eq!(
             parsed_diff.hunks[1],
-            "@@ -10,2 +11,2 @@\n line 10\n-line 11 old\n+line 11 new"
+            "@@ -10,2 +11,2 @@
+ line 10
+-line 11 old
++line 11 new"
         );
     }
 
@@ -397,6 +426,50 @@ index 1234567..abcdefg 100644
     }
 
     #[test]
+    fn test_get_hunk_index_from_line() {
+        let diff_output = r###"diff --git a/file.txt b/file.txt
+index 1234567..abcdefg 100644
+--- a/file.txt
++++ b/file.txt
+@@ -1,3 +1,4 @@
+ line 1
+-line 2
++line 2 modified
++line 3 new
+ line 3
+@@ -10,2 +11,2 @@
+ line 10
+-line 11 old
++line 11 new
+"###;
+        let parsed_diff = parse_diff_output(diff_output);
+
+        // Header lines (0-3)
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 0), None);
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 1), None);
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 2), None);
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 3), None);
+
+        // Hunk 0 lines (4-9) - 6 lines
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 4), Some(0)); // @@ -1,3 +1,4 @@
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 5), Some(0)); //  line 1
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 6), Some(0)); // -line 2
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 7), Some(0)); // +line 2 modified
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 8), Some(0)); // +line 3 new
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 9), Some(0)); //  line 3
+
+        // Hunk 1 lines (10-13) - 4 lines
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 10), Some(1)); // @@ -10,2 +11,2 @@
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 11), Some(1)); //  line 10
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 12), Some(1)); // -line 11 old
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 13), Some(1)); // +line 11 new
+
+        // Beyond all hunks
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 14), None);
+        assert_eq!(get_hunk_index_from_line(&parsed_diff, 100), None);
+    }
+
+    #[test]
     fn test_apply_patch_to_index() {
         let repo_path = setup_test_repo("apply_patch_to_index");
         let repo = Repository::open(&repo_path).unwrap();
@@ -450,7 +523,10 @@ line 15 modified
 
         // 3. Get the diff from workdir to index
         let diff_output = get_diff(&repo, "test_file.txt", FileType::NotStaged).unwrap();
-        println!("Diff Output:\n{}", diff_output);
+        println!(
+            "Diff Output:
+{diff_output}"
+        );
         let parsed_diff = parse_diff_output(&diff_output);
         println!("Number of hunks: {}", parsed_diff.hunks.len());
 
@@ -462,7 +538,10 @@ line 15 modified
 
         // 4. Create a patch for the first hunk
         let patch_hunk_0 = create_patch_from_hunk(&parsed_diff, 0).unwrap();
-        println!("Patch Hunk 0:\n```{}```", patch_hunk_0);
+        println!(
+            "Patch Hunk 0:
+```{patch_hunk_0}```"
+        );
 
         // 5. Apply the patch to the index
         apply_patch_to_index(&repo_path, &patch_hunk_0).unwrap();
