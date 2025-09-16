@@ -165,7 +165,7 @@ pub fn commit(repo: &Repository, message: &str) -> Result<Oid, Error> {
     )
 }
 
-pub fn apply_patch_to_index(patch: &str) -> Result<(), String> {
+pub fn apply_patch_to_index(repo_path: &Path, patch: &str) -> Result<(), String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -175,6 +175,7 @@ pub fn apply_patch_to_index(patch: &str) -> Result<(), String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .current_dir(repo_path) // Set the current directory explicitly
         .spawn()
         .map_err(|e| format!("Failed to spawn git apply command: {}", e))?;
 
@@ -464,7 +465,7 @@ line 15 modified
         println!("Patch Hunk 0:\n```{}```", patch_hunk_0);
 
         // 5. Apply the patch to the index
-        apply_patch_to_index(&patch_hunk_0).unwrap();
+        apply_patch_to_index(&repo_path, &patch_hunk_0).unwrap();
 
         // 6. Verify the index status
         let status_files = get_status(&repo);
