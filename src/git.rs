@@ -321,7 +321,8 @@ index 1234567..abcdefg 100644
 @@ -10,2 +11,2 @@
  line 10
 -line 11 old
-+line 11 new"###;
++line 11 new
+"###;
 
         let parsed_diff = parse_diff_output(diff_output);
 
@@ -356,7 +357,8 @@ index 1234567..abcdefg 100644
 @@ -10,2 +11,2 @@
  line 10
 -line 11 old
-+line 11 new"###;
++line 11 new
+"###;
 
         let parsed_diff = parse_diff_output(diff_output);
 
@@ -371,7 +373,8 @@ index 1234567..abcdefg 100644
 -line 2
 +line 2 modified
 +line 3 new
- line 3"###;
+ line 3
+"###;
         assert_eq!(patch_hunk_0, expected_patch_hunk_0);
 
         // Test with the second hunk (index 1)
@@ -383,7 +386,8 @@ index 1234567..abcdefg 100644
 @@ -10,2 +11,2 @@
  line 10
 -line 11 old
-+line 11 new"###;
++line 11 new
+"###;
         assert_eq!(patch_hunk_1, expected_patch_hunk_1);
 
         // Test with an out-of-bounds index
