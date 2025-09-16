@@ -1,6 +1,6 @@
 use git2::{Commit, Diff, DiffOptions, Error, ErrorCode, Oid, Repository, Status, StatusOptions};
 use std::cell::RefCell;
-use std::path::Path;
+use std::{path::Path};
 
 #[derive(Default, Clone)]
 pub struct StatusFiles {
@@ -77,16 +77,14 @@ pub fn get_diff(repo: &Repository, path_str: &str, file_type: FileType) -> Resul
             let mut diff_opts = DiffOptions::new();
             diff_opts.pathspec(path);
             let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-            let diff = repo
-                .diff_tree_to_index(head_tree.as_ref(), None, Some(&mut diff_opts))
+            let diff = repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut diff_opts))
                 .map_err(|e| e.to_string())?;
             format_diff(diff, None)
         }
         FileType::NotStaged => {
             let mut diff_opts = DiffOptions::new();
             diff_opts.pathspec(path);
-            let diff = repo
-                .diff_index_to_workdir(None, Some(&mut diff_opts))
+            let diff = repo.diff_index_to_workdir(None, Some(&mut diff_opts))
                 .map_err(|e| e.to_string())?;
             format_diff(diff, None)
         }
@@ -95,7 +93,6 @@ pub fn get_diff(repo: &Repository, path_str: &str, file_type: FileType) -> Resul
 
 fn format_diff(diff: Diff, line_number: Option<usize>) -> Result<String, String> {
     let diff_str = RefCell::new(String::new());
-    let target_hunk = RefCell::new(0);
     diff.foreach(
         &mut |delta, _| {
             let mut diff_str = diff_str.borrow_mut();
@@ -134,19 +131,9 @@ fn format_diff(diff: Diff, line_number: Option<usize>) -> Result<String, String>
             }
             let mut diff_str = diff_str.borrow_mut();
             diff_str.push_str(&String::from_utf8_lossy(hunk.header()));
-            target_hunk.replace(hunk.new_start());
             true
         }),
-        Some(&mut |_delta, hunk, line| {
-            // check if target hunk
-            if let Some(line_number) = line_number {
-                if let Some(h) = hunk {
-                    let hunk_start_line = *target_hunk.borrow();
-                    if hunk_start_line != h.new_start() {
-                        return true;
-                    }
-                }
-            }
+        Some(&mut |_delta, _hunk, line| {
             let mut diff_str = diff_str.borrow_mut();
             let prefix = match line.origin() {
                 '+' | '-' | '=' => line.origin().to_string(),
@@ -222,7 +209,7 @@ mod tests {
     use super::*;
     use git2::Repository;
     use std::fs;
-
+    
     use tempfile::TempDir;
 
     fn setup_repo() -> (TempDir, Repository) {
@@ -299,36 +286,28 @@ line 15
 
         let mut diff_opts = DiffOptions::new();
         diff_opts.pathspec(Path::new(file_name));
-        let diff = repo
-            .diff_index_to_workdir(None, Some(&mut diff_opts))
-            .unwrap();
+        let diff = repo.diff_index_to_workdir(None, Some(&mut diff_opts)).unwrap();
 
         // Test extracting the first hunk (line 2)
-        let diff_for_hunk1 = repo
-            .diff_index_to_workdir(None, Some(&mut diff_opts))
-            .unwrap();
+        let diff_for_hunk1 = repo.diff_index_to_workdir(None, Some(&mut diff_opts)).unwrap();
         let hunk1_diff = format_diff(diff_for_hunk1, Some(2)).unwrap();
-        println!(
-            "Hunk 1 Diff:
-{hunk1_diff}"
-        );
+        println!("Hunk 1 Diff:
+{}", hunk1_diff);
         assert!(hunk1_diff.contains("-line 2"));
         assert!(hunk1_diff.contains("+MODIFIED LINE 2"));
         assert!(!hunk1_diff.contains("-line 12"));
         assert!(!hunk1_diff.contains("+MODIFIED LINE 12"));
+        assert!(hunk1_diff.contains("@@ -2,7 +2,7 @@")); // Check for hunk header, context lines might vary
 
         // Test extracting the second hunk (line 12)
-        let diff_for_hunk2 = repo
-            .diff_index_to_workdir(None, Some(&mut diff_opts))
-            .unwrap();
+        let diff_for_hunk2 = repo.diff_index_to_workdir(None, Some(&mut diff_opts)).unwrap();
         let hunk2_diff = format_diff(diff_for_hunk2, Some(12)).unwrap();
-        println!(
-            "Hunk 2 Diff:
-{hunk2_diff}"
-        );
+        println!("Hunk 2 Diff:
+{}", hunk2_diff);
         assert!(!hunk2_diff.contains("-line 2"));
         assert!(!hunk2_diff.contains("+MODIFIED LINE 2"));
         assert!(hunk2_diff.contains("-line 12"));
         assert!(hunk2_diff.contains("+MODIFIED LINE 12"));
+        assert!(hunk2_diff.contains("@@ -12,4 +12,4 @@")); // Check for hunk header, context lines might vary
     }
 }
