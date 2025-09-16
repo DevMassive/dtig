@@ -1,10 +1,10 @@
 use ratatui::{
-    Terminal,
     crossterm::{
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
         ExecutableCommand,
-        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
     prelude::*,
+    Terminal,
 };
 use std::io::{self, stdout};
 
