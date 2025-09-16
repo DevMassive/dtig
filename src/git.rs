@@ -52,7 +52,7 @@ pub fn get_status(repo: &Repository) -> StatusFiles {
     status_files
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
     Staged,
     NotStaged,
@@ -193,6 +193,43 @@ pub fn apply_patch_to_index(repo_path: &Path, patch: &str) -> Result<(), String>
     } else {
         Err(format!(
             "git apply failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+pub fn reverse_patch_from_index(repo_path: &Path, patch: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("git")
+        .arg("apply")
+        .arg("--cached")
+        .arg("--reverse")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .current_dir(repo_path)
+        .spawn()
+        .map_err(|e| format!("Failed to spawn git apply command: {e}"))?;
+
+    {
+        let stdin = child.stdin.as_mut().ok_or("Failed to open stdin")?;
+        stdin
+            .write_all(patch.as_bytes())
+            .map_err(|e| format!("Failed to write patch to stdin: {e}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to wait for git apply command: {e}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "git apply --reverse failed: {}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ))
@@ -582,6 +619,45 @@ line 15 modified
         // The staged_diff_str should contain only the first hunk's changes
         // Note: The index hash will be different, so we only compare the hunk part
         assert!(staged_diff_str.contains(&parsed_diff.hunks[0]));
+
+        // Clean up
+        teardown_test_repo(&repo_path);
+    }
+
+    #[test]
+    fn test_reverse_patch_from_index() {
+        let repo_path = setup_test_repo("reverse_patch_from_index");
+        let repo = Repository::open(&repo_path).unwrap();
+
+        // 1. Create a file and commit it
+        let file_path = repo_path.join("test_file.txt");
+        fs::write(&file_path, "line 1\nline 2\n").unwrap();
+        stage(&repo, "test_file.txt").unwrap();
+        commit(&repo, "Initial commit").unwrap();
+
+        // 2. Modify the file
+        fs::write(&file_path, "line 1 modified\nline 2\n").unwrap();
+
+        // 3. Stage the changes
+        stage(&repo, "test_file.txt").unwrap();
+
+        // 4. Verify that the file is staged
+        let status_files_before = get_status(&repo);
+        assert!(status_files_before.staged.contains(&"test_file.txt".to_string()));
+        assert!(!status_files_before.not_staged.contains(&"test_file.txt".to_string()));
+
+        // 5. Get the staged diff to create a patch
+        let diff_output = get_diff(&repo, "test_file.txt", FileType::Staged).unwrap();
+        let parsed_diff = parse_diff_output(&diff_output);
+        let patch = create_patch_from_hunk(&parsed_diff, 0).unwrap();
+
+        // 6. Apply the patch in reverse to the index
+        reverse_patch_from_index(&repo_path, &patch).unwrap();
+
+        // 7. Verify the index status
+        let status_files_after = get_status(&repo);
+        assert!(!status_files_after.staged.contains(&"test_file.txt".to_string()));
+        assert!(status_files_after.not_staged.contains(&"test_file.txt".to_string()));
 
         // Clean up
         teardown_test_repo(&repo_path);
