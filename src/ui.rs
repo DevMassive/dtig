@@ -1,4 +1,5 @@
 use crate::app::{App, FocusArea};
+use crate::git::FileType;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     prelude::*,
@@ -45,20 +46,20 @@ pub fn ui(frame: &mut Frame, app: &App) {
         )
         .split(left_chunks[1]);
 
-    let mut current_index = 0;
-
     let staged_items: Vec<ListItem> = app
         .status
         .staged
         .iter()
-        .map(|file| {
+        .enumerate()
+        .map(|(i, file)| {
             let mut style = Style::default();
             if let FocusArea::Files = app.focus {
-                if app.selected_index == current_index {
+                if matches!(app.selected_file_type, FileType::Staged)
+                    && app.selected_file_index == i
+                {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
             }
-            current_index += 1;
             ListItem::new(file.as_str()).style(style)
         })
         .collect();
@@ -70,14 +71,16 @@ pub fn ui(frame: &mut Frame, app: &App) {
         .status
         .not_staged
         .iter()
-        .map(|file| {
+        .enumerate()
+        .map(|(i, file)| {
             let mut style = Style::default();
             if let FocusArea::Files = app.focus {
-                if app.selected_index == current_index {
+                if matches!(app.selected_file_type, FileType::NotStaged)
+                    && app.selected_file_index == i
+                {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
             }
-            current_index += 1;
             ListItem::new(file.as_str()).style(style)
         })
         .collect();
@@ -89,14 +92,16 @@ pub fn ui(frame: &mut Frame, app: &App) {
         .status
         .untracked
         .iter()
-        .map(|file| {
+        .enumerate()
+        .map(|(i, file)| {
             let mut style = Style::default();
             if let FocusArea::Files = app.focus {
-                if app.selected_index == current_index {
+                if matches!(app.selected_file_type, FileType::Untracked)
+                    && app.selected_file_index == i
+                {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
             }
-            current_index += 1;
             ListItem::new(file.as_str()).style(style)
         })
         .collect();

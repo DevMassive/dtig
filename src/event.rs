@@ -1,4 +1,5 @@
 use crate::app::{App, FocusArea};
+use crate::git::FileType;
 use ratatui::crossterm::event::KeyCode;
 
 pub fn handle_key_event(app: &mut App, key_code: KeyCode, diff_view_height: u16) {
@@ -19,7 +20,9 @@ pub fn handle_key_event(app: &mut App, key_code: KeyCode, diff_view_height: u16)
             KeyCode::Char('q') => app.should_quit = true,
             KeyCode::Down => app.select_next(),
             KeyCode::Up => {
-                if app.selected_index == 0 {
+                if app.selected_file_index == 0
+                    && matches!(app.selected_file_type, FileType::Staged)
+                {
                     app.focus = FocusArea::Commit;
                 } else {
                     app.select_previous();
@@ -91,7 +94,8 @@ mod tests {
 
         // Initial state: Files focus
         assert!(matches!(app.focus, FocusArea::Files));
-        assert_eq!(app.selected_index, 0);
+        assert!(matches!(app.selected_file_type, FileType::Staged));
+        assert_eq!(app.selected_file_index, 0);
 
         // Press Up at index 0 -> focus moves to Commit
         handle_key_event(&mut app, KeyCode::Up, 10);
@@ -100,7 +104,8 @@ mod tests {
         // Press Down -> focus moves back to Files
         handle_key_event(&mut app, KeyCode::Down, 10);
         assert!(matches!(app.focus, FocusArea::Files));
-        assert_eq!(app.selected_index, 0);
+        assert!(matches!(app.selected_file_type, FileType::Staged));
+        assert_eq!(app.selected_file_index, 0);
     }
 
     #[test]
@@ -138,11 +143,12 @@ mod tests {
         let mut app = App::new(&repo);
 
         assert_eq!(app.status.total_files(), 2);
-        app.selected_index = 1; // Start at the second file
+        app.selected_file_type = FileType::Staged;
+        app.selected_file_index = 1; // Start at the second file
 
         // Press Up, should not change focus
         handle_key_event(&mut app, KeyCode::Up, 10);
         assert!(matches!(app.focus, FocusArea::Files));
-        assert_eq!(app.selected_index, 0);
+        assert_eq!(app.selected_file_index, 0);
     }
 }

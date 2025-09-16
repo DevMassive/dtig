@@ -10,7 +10,8 @@ pub enum FocusArea {
 pub struct App<'a> {
     pub repo: &'a Repository,
     pub status: StatusFiles,
-    pub selected_index: usize,
+    pub selected_file_type: FileType,
+    pub selected_file_index: usize,
     pub should_quit: bool,
     pub commit_message: String,
     pub focus: FocusArea,
@@ -25,7 +26,8 @@ impl<'a> App<'a> {
         let mut app = Self {
             repo,
             status: StatusFiles::default(),
-            selected_index: 0,
+            selected_file_type: FileType::Staged,
+            selected_file_index: 0,
             should_quit: false,
             commit_message: String::new(),
             focus: FocusArea::Files,
@@ -40,37 +42,37 @@ impl<'a> App<'a> {
 
     pub fn update_status(&mut self) {
         self.status = git::get_status(self.repo);
-        let total_files = self.status.total_files();
-        if total_files == 0 {
-            self.selected_index = 0;
-        } else if self.selected_index >= total_files {
-            self.selected_index = total_files - 1;
+        let current_section_len = match self.selected_file_type {
+            FileType::Staged => self.status.staged.len(),
+            FileType::NotStaged => self.status.not_staged.len(),
+            FileType::Untracked => self.status.untracked.len(),
+        };
+
+        if current_section_len == 0 {
+            self.selected_file_index = 0;
+        } else if self.selected_file_index >= current_section_len {
+            self.selected_file_index = current_section_len - 1;
         }
         self.update_diff();
     }
 
     fn get_selected_file(&self) -> Option<(String, FileType)> {
-        let total_staged = self.status.staged.len();
-        let total_not_staged = self.status.not_staged.len();
-
-        if self.selected_index < total_staged {
-            Some((
-                self.status.staged[self.selected_index].clone(),
-                FileType::Staged,
-            ))
-        } else if self.selected_index < total_staged + total_not_staged {
-            Some((
-                self.status.not_staged[self.selected_index - total_staged].clone(),
-                FileType::NotStaged,
-            ))
-        } else if self.selected_index < self.status.total_files() {
-            Some((
-                self.status.untracked[self.selected_index - total_staged - total_not_staged]
-                    .clone(),
-                FileType::Untracked,
-            ))
-        } else {
-            None
+        match self.selected_file_type {
+            FileType::Staged => self
+                .status
+                .staged
+                .get(self.selected_file_index)
+                .map(|s| (s.clone(), FileType::Staged)),
+            FileType::NotStaged => self
+                .status
+                .not_staged
+                .get(self.selected_file_index)
+                .map(|s| (s.clone(), FileType::NotStaged)),
+            FileType::Untracked => self
+                .status
+                .untracked
+                .get(self.selected_file_index)
+                .map(|s| (s.clone(), FileType::Untracked)),
         }
     }
 
@@ -97,20 +99,102 @@ impl<'a> App<'a> {
     }
 
     pub fn select_next(&mut self) {
-        let total = self.status.total_files();
-        if total > 0 {
-            self.selected_index = (self.selected_index + 1) % total;
+        let (staged_len, not_staged_len, untracked_len) = (
+            self.status.staged.len(),
+            self.status.not_staged.len(),
+            self.status.untracked.len(),
+        );
+
+        match self.selected_file_type {
+            FileType::Staged => {
+                if self.selected_file_index + 1 < staged_len {
+                    self.selected_file_index += 1;
+                } else if not_staged_len > 0 {
+                    self.selected_file_type = FileType::NotStaged;
+                    self.selected_file_index = 0;
+                } else if untracked_len > 0 {
+                    self.selected_file_type = FileType::Untracked;
+                    self.selected_file_index = 0;
+                } else {
+                    self.selected_file_index = 0;
+                }
+            }
+            FileType::NotStaged => {
+                if self.selected_file_index + 1 < not_staged_len {
+                    self.selected_file_index += 1;
+                } else if untracked_len > 0 {
+                    self.selected_file_type = FileType::Untracked;
+                    self.selected_file_index = 0;
+                } else if staged_len > 0 {
+                    self.selected_file_type = FileType::Staged;
+                    self.selected_file_index = 0;
+                } else {
+                    self.selected_file_index = 0;
+                }
+            }
+            FileType::Untracked => {
+                if self.selected_file_index + 1 < untracked_len {
+                    self.selected_file_index += 1;
+                } else if staged_len > 0 {
+                    self.selected_file_type = FileType::Staged;
+                    self.selected_file_index = 0;
+                } else if not_staged_len > 0 {
+                    self.selected_file_type = FileType::NotStaged;
+                    self.selected_file_index = 0;
+                } else {
+                    self.selected_file_index = 0;
+                }
+            }
         }
         self.update_diff();
     }
 
     pub fn select_previous(&mut self) {
-        let total = self.status.total_files();
-        if total > 0 {
-            if self.selected_index == 0 {
-                self.selected_index = total - 1;
-            } else {
-                self.selected_index -= 1;
+        let (staged_len, not_staged_len, untracked_len) = (
+            self.status.staged.len(),
+            self.status.not_staged.len(),
+            self.status.untracked.len(),
+        );
+
+        match self.selected_file_type {
+            FileType::Staged => {
+                if self.selected_file_index > 0 {
+                    self.selected_file_index -= 1;
+                } else if untracked_len > 0 {
+                    self.selected_file_type = FileType::Untracked;
+                    self.selected_file_index = untracked_len - 1;
+                } else if not_staged_len > 0 {
+                    self.selected_file_type = FileType::NotStaged;
+                    self.selected_file_index = not_staged_len - 1;
+                } else {
+                    self.selected_file_index = 0;
+                }
+            }
+            FileType::NotStaged => {
+                if self.selected_file_index > 0 {
+                    self.selected_file_index -= 1;
+                } else if staged_len > 0 {
+                    self.selected_file_type = FileType::Staged;
+                    self.selected_file_index = staged_len - 1;
+                } else if untracked_len > 0 {
+                    self.selected_file_type = FileType::Untracked;
+                    self.selected_file_index = untracked_len - 1;
+                } else {
+                    self.selected_file_index = 0;
+                }
+            }
+            FileType::Untracked => {
+                if self.selected_file_index > 0 {
+                    self.selected_file_index -= 1;
+                } else if not_staged_len > 0 {
+                    self.selected_file_type = FileType::NotStaged;
+                    self.selected_file_index = not_staged_len - 1;
+                } else if staged_len > 0 {
+                    self.selected_file_type = FileType::Staged;
+                    self.selected_file_index = staged_len - 1;
+                } else {
+                    self.selected_file_index = 0;
+                }
             }
         }
         self.update_diff();
@@ -141,7 +225,8 @@ impl<'a> App<'a> {
         if let Some(parsed_diff) = &self.parsed_diff {
             if let Some(hunk_index) = git::get_hunk_index_from_line(
                 parsed_diff,
-                self.diff_selected_line.saturating_sub(self.diff_scroll as usize),
+                self.diff_selected_line
+                    .saturating_sub(self.diff_scroll as usize),
             ) {
                 if let Some(patch) = git::create_patch_from_hunk(parsed_diff, hunk_index) {
                     let repo_path = self.repo.path().parent().unwrap();
@@ -251,7 +336,8 @@ mod tests {
 
         assert_eq!(app.status.untracked.len(), 1);
         assert_eq!(app.status.staged.len(), 0);
-        app.selected_index = 0;
+        app.selected_file_type = FileType::Untracked;
+        app.selected_file_index = 0;
 
         app.toggle_selection();
 
@@ -278,7 +364,8 @@ mod tests {
 
         assert_eq!(app.status.staged.len(), 1);
         assert_eq!(app.status.untracked.len(), 0);
-        app.selected_index = 0;
+        app.selected_file_type = FileType::Staged;
+        app.selected_file_index = 0;
 
         app.toggle_selection();
 
@@ -334,7 +421,8 @@ mod tests {
         );
 
         // 5. Select the file and unstage it
-        app.selected_index = 0;
+        app.selected_file_type = FileType::Staged;
+        app.selected_file_index = 0;
         app.toggle_selection();
 
         // 6. Assert final state (file is now not-staged)
@@ -409,13 +497,14 @@ mod tests {
         let mut app = App::new(&repo);
 
         // Test diff for staged file
-        let staged_index = app
+        let staged_index_in_vec = app
             .status
             .staged
             .iter()
             .position(|r| r == "staged.txt")
             .unwrap();
-        app.selected_index = staged_index;
+        app.selected_file_type = FileType::Staged;
+        app.selected_file_index = staged_index_in_vec;
         app.update_diff();
         assert!(
             app.diff.contains("\n+line2"),
@@ -424,13 +513,14 @@ mod tests {
         );
 
         // Test diff for not-staged file
-        let not_staged_index = app
+        let not_staged_index_in_vec = app
             .status
             .not_staged
             .iter()
             .position(|r| r == "not_staged.txt")
             .unwrap();
-        app.selected_index = app.status.staged.len() + not_staged_index;
+        app.selected_file_type = FileType::NotStaged;
+        app.selected_file_index = not_staged_index_in_vec;
         app.update_diff();
         assert!(
             app.diff.contains("\n+def"),
@@ -439,14 +529,14 @@ mod tests {
         );
 
         // Test diff for untracked file
-        let untracked_index = app
+        let untracked_index_in_vec = app
             .status
             .untracked
             .iter()
             .position(|r| r == "untracked.txt")
             .unwrap();
-        app.selected_index =
-            app.status.staged.len() + app.status.not_staged.len() + untracked_index;
+        app.selected_file_type = FileType::Untracked;
+        app.selected_file_index = untracked_index_in_vec;
         app.update_diff();
         assert!(
             app.diff.contains("+new"),
