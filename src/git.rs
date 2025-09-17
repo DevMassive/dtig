@@ -643,8 +643,16 @@ line 15 modified
 
         // 4. Verify that the file is staged
         let status_files_before = get_status(&repo);
-        assert!(status_files_before.staged.contains(&"test_file.txt".to_string()));
-        assert!(!status_files_before.not_staged.contains(&"test_file.txt".to_string()));
+        assert!(
+            status_files_before
+                .staged
+                .contains(&"test_file.txt".to_string())
+        );
+        assert!(
+            !status_files_before
+                .not_staged
+                .contains(&"test_file.txt".to_string())
+        );
 
         // 5. Get the staged diff to create a patch
         let diff_output = get_diff(&repo, "test_file.txt", FileType::Staged).unwrap();
@@ -656,8 +664,16 @@ line 15 modified
 
         // 7. Verify the index status
         let status_files_after = get_status(&repo);
-        assert!(!status_files_after.staged.contains(&"test_file.txt".to_string()));
-        assert!(status_files_after.not_staged.contains(&"test_file.txt".to_string()));
+        assert!(
+            !status_files_after
+                .staged
+                .contains(&"test_file.txt".to_string())
+        );
+        assert!(
+            status_files_after
+                .not_staged
+                .contains(&"test_file.txt".to_string())
+        );
 
         // Clean up
         teardown_test_repo(&repo_path);

@@ -56,9 +56,10 @@ pub fn handle_key_event(app: &mut App, key_code: KeyCode, diff_view_height: u16)
                     }
                 }
             }
-            KeyCode::Enter => {
-                app.apply_hunk();
-            }
+            KeyCode::Enter => match app.selected_file_type {
+                FileType::Staged => app.reverse_hunk(),
+                _ => app.apply_hunk(),
+            },
             _ => {}
         },
     }
@@ -68,18 +69,35 @@ pub fn handle_key_event(app: &mut App, key_code: KeyCode, diff_view_height: u16)
 mod tests {
     use super::*;
     use crate::app::{App, FocusArea};
-    use git2::Repository;
+    use git2::{Repository, Signature};
     use ratatui::crossterm::event::KeyCode;
     use std::fs::File;
+    use std::io::Write;
+    use std::path::Path;
     use tempfile::TempDir;
 
-    // Helper functions duplicated from app.rs tests
     fn setup_repo(temp_dir: &TempDir) -> Repository {
         let repo = Repository::init(temp_dir.path()).unwrap();
         let mut config = repo.config().unwrap();
         config.set_str("user.name", "Test User").unwrap();
         config.set_str("user.email", "test@example.com").unwrap();
         repo
+    }
+
+    fn commit_initial(repo: &Repository) {
+        let mut index = repo.index().unwrap();
+        let oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(oid).unwrap();
+        let signature = Signature::now("Test User", "test@example.com").unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "initial commit",
+            &tree,
+            &[],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -150,5 +168,47 @@ mod tests {
         handle_key_event(&mut app, KeyCode::Up, 10);
         assert!(matches!(app.focus, FocusArea::Files));
         assert_eq!(app.selected_file_index, 0);
+    }
+
+    #[test]
+    fn test_enter_in_diff_view_reverse_hunk() {
+        // 1. Setup repo and commit a file
+        let temp_dir = TempDir::new().unwrap();
+        let repo = setup_repo(&temp_dir);
+        let file_path = temp_dir.path().join("test.txt");
+        let initial_content = "line 1\nline 2\nline 3\n";
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, "{initial_content}").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("test.txt")).unwrap();
+        index.write().unwrap();
+        commit_initial(&repo);
+
+        // 2. Modify the file and stage it
+        let modified_content = "line 1 modified\nline 2\nline 3\n";
+        let mut file = File::options()
+            .write(true)
+            .truncate(true)
+            .open(&file_path)
+            .unwrap();
+        writeln!(file, "{modified_content}").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("test.txt")).unwrap();
+        index.write().unwrap();
+
+        // 3. Create app, select file and focus diff
+        let mut app = App::new(&repo);
+        app.selected_file_type = FileType::Staged;
+        app.selected_file_index = 0;
+        app.focus = FocusArea::Diff;
+        app.update_diff();
+        app.diff_selected_line = 5; // Select a line in the hunk
+
+        // 4. Press Enter
+        handle_key_event(&mut app, KeyCode::Enter, 10);
+
+        // 5. Assert that the hunk was reversed
+        let status = crate::git::get_status(&repo);
+        assert!(status.not_staged.contains(&"test.txt".to_string()));
     }
 }

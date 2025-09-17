@@ -237,6 +237,25 @@ impl<'a> App<'a> {
             }
         }
     }
+
+    pub fn reverse_hunk(&mut self) {
+        if self.selected_file_type == FileType::Staged {
+            if let Some(parsed_diff) = &self.parsed_diff {
+                if let Some(hunk_index) = git::get_hunk_index_from_line(
+                    parsed_diff,
+                    self.diff_selected_line
+                        .saturating_sub(self.diff_scroll as usize),
+                ) {
+                    if let Some(patch) = git::create_patch_from_hunk(parsed_diff, hunk_index) {
+                        let repo_path = self.repo.path().parent().unwrap();
+                        if git::reverse_patch_from_index(repo_path, &patch).is_ok() {
+                            self.update_status();
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -556,7 +575,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let mut file = File::create(&file_path).unwrap();
-        writeln!(file, "{}", initial_content).unwrap();
+        writeln!(file, "{initial_content}").unwrap();
 
         let mut index = repo.index().unwrap();
         index.add_path(Path::new("test.txt")).unwrap();
@@ -586,7 +605,7 @@ mod tests {
             .truncate(true)
             .open(&file_path)
             .unwrap();
-        writeln!(file, "{}", modified_content).unwrap();
+        writeln!(file, "{modified_content}").unwrap();
 
         // 3. Create app and check initial state
         let mut app = App::new(&repo);
@@ -628,5 +647,95 @@ mod tests {
         app.update_diff();
         assert!(!app.diff.contains("+line 1 modified"));
         assert!(app.diff.contains("+line 10 modified"));
+    }
+
+    #[test]
+    fn test_reverse_hunk() {
+        // 1. Setup repo and commit a file
+        let temp_dir = TempDir::new().unwrap();
+        let repo = setup_repo(&temp_dir);
+        let file_path = temp_dir.path().join("test.txt");
+        let initial_content = (1..=10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, "{initial_content}").unwrap();
+
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("test.txt")).unwrap();
+        index.write().unwrap();
+        let oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(oid).unwrap();
+        let signature = Signature::now("Test User", "test@example.com").unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "initial commit",
+            &tree,
+            &[],
+        )
+        .unwrap();
+
+        // 2. Modify the file in two places to create two hunks
+        let modified_content = "line 1 modified\n".to_string()
+            + &(2..=9)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+            + "\nline 10 modified";
+        let mut file = File::options()
+            .write(true)
+            .truncate(true)
+            .open(&file_path)
+            .unwrap();
+        writeln!(file, "{modified_content}").unwrap();
+
+        // 3. Stage the file
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("test.txt")).unwrap();
+        index.write().unwrap();
+
+        // 4. Create app and check initial state
+        let mut app = App::new(&repo);
+        assert_eq!(app.status.staged.len(), 1);
+        assert_eq!(app.status.staged[0], "test.txt");
+        assert_eq!(app.status.not_staged.len(), 0);
+
+        // 5. Select the file and a line in the first hunk
+        app.selected_file_type = FileType::Staged;
+        app.selected_file_index = 0;
+        app.update_diff(); // This will parse the diff
+
+        // A line inside the first hunk (after the 4 header lines)
+        app.diff_selected_line = 5;
+
+        // 6. Reverse the hunk
+        app.reverse_hunk();
+
+        // 7. Assert the new state
+        assert_eq!(app.status.staged.len(), 1, "File should be staged");
+        assert_eq!(app.status.staged[0], "test.txt");
+        assert_eq!(
+            app.status.not_staged.len(),
+            1,
+            "File should still be not-staged"
+        );
+        assert_eq!(app.status.not_staged[0], "test.txt");
+
+        // 8. Verify staged diff content (second hunk should be there)
+        app.selected_file_type = FileType::Staged;
+        app.selected_file_index = 0;
+        app.update_diff();
+        assert!(!app.diff.contains("+line 1 modified"));
+        assert!(app.diff.contains("+line 10 modified"));
+
+        // 9. Verify not-staged diff content (first hunk should be there)
+        app.selected_file_type = FileType::NotStaged;
+        app.selected_file_index = 0;
+        app.update_diff();
+        assert!(app.diff.contains("+line 1 modified"));
+        assert!(!app.diff.contains("+line 10 modified"));
     }
 }
